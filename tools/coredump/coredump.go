@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"runtime"
 	"time"
 	"unsafe"
@@ -50,7 +51,7 @@ func (c *symbolizationCache) ExecutableKnown(fileID libpf.FileID) bool {
 }
 
 func (c *symbolizationCache) ExecutableMetadata(args *reporter.ExecutableMetadataArgs) {
-	c.files[args.FileID] = args.FileName
+	c.files[args.FileID] = path.Base(args.FileName)
 }
 
 func generateErrorMap() (map[libpf.AddressOrLineno]string, error) {
