@@ -27,6 +27,7 @@ import (
 
 // GetMappings returns this error when no mappings can be extracted.
 var ErrNoMappings = errors.New("no mappings")
+var selfPid = os.Getpid()
 
 // systemProcess provides an implementation of the Process interface for a
 // process that is currently running on this machine.
@@ -395,7 +396,7 @@ func (sp *systemProcess) Open(file string) (ReadAtCloser, string, error) {
 		}
 		path := sp.getMappingFile(m)
 		f, err := os.Open(path)
-		return f, path, err
+		return f, fmt.Sprintf("/proc/%v/fd/%v", selfPid, f.Fd()), err
 	}
 
 	path, err := sp.ExtractAsFile(file)
@@ -403,5 +404,5 @@ func (sp *systemProcess) Open(file string) (ReadAtCloser, string, error) {
 		return nil, "", fmt.Errorf("failed to extract file: %v", err)
 	}
 	f, err := os.Open(path)
-	return f, path, err
+	return f, fmt.Sprintf("/proc/%v/fd/%v", selfPid, f.Fd()), err
 }
