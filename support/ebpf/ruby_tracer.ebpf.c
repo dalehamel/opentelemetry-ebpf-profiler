@@ -55,6 +55,8 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
   const void *current_ctx_addr,
   int *next_unwinder)
 {
+  DEBUG_PRINT("ruby: walk_ruby_stack entered, ctx_addr=0x%lx", (unsigned long)current_ctx_addr);
+
   if (!current_ctx_addr) {
     *next_unwinder = get_next_unwinder_after_interpreter();
     return ERR_OK;
@@ -86,6 +88,7 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
       increment_metric(metricID_UnwindRubyErrReadStackPtr);
       return ERR_RUBY_READ_STACK_PTR;
     }
+    DEBUG_PRINT("ruby: stack_ptr_current = 0x%lx", (unsigned long)stack_ptr_current);
 
     if (bpf_probe_read_user(
           &stack_size, sizeof(stack_size), (void *)(current_ctx_addr + rubyinfo->vm_stack_size))) {
@@ -93,12 +96,14 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
       increment_metric(metricID_UnwindRubyErrReadStackSize);
       return ERR_RUBY_READ_STACK_SIZE;
     }
+    DEBUG_PRINT("ruby: stack_size = %lu", (unsigned long)stack_size);
 
     // Calculate the base of the stack so we can calculate the number of frames from it.
     // Ruby places two dummy frames on the Ruby VM stack in which we are not interested.
     // https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_backtrace.c#L477-L485
     last_stack_frame = stack_ptr_current + (rubyinfo->size_of_value * stack_size) -
                        (2 * rubyinfo->size_of_control_frame_struct);
+    DEBUG_PRINT("ruby: last_stack_frame = 0x%lx", (unsigned long)last_stack_frame);
 
     if (bpf_probe_read_user(
           &stack_ptr, sizeof(stack_ptr), (void *)(current_ctx_addr + rubyinfo->cfp))) {
@@ -106,6 +111,7 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
       increment_metric(metricID_UnwindRubyErrReadCfp);
       return ERR_RUBY_READ_CFP;
     }
+    DEBUG_PRINT("ruby: stack_ptr (cfp) = 0x%lx", (unsigned long)stack_ptr);
   }
 
   // iseq_addr holds the address to a rb_iseq_struct struct
@@ -122,16 +128,44 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
   u32 iseq_size;
   s64 n;
 
+  DEBUG_PRINT("ruby: about to start frame iteration");
+  DEBUG_PRINT("ruby: starting frame iteration, stack_ptr=0x%lx, last_stack_frame=0x%lx",
+              (unsigned long)stack_ptr, (unsigned long)last_stack_frame);
+
+  // Check the comparison before the loop
+  if (stack_ptr >= last_stack_frame) {
+    DEBUG_PRINT("ruby: stack_ptr >= last_stack_frame before loop, exiting");
+    *next_unwinder = PROG_UNWIND_NATIVE;
+    return ERR_OK;
+  }
+
+  DEBUG_PRINT("ruby: entering UNROLL loop");
+
   UNROLL for (u32 i = 0; i < FRAMES_PER_WALK_RUBY_STACK; ++i)
   {
     pc        = 0;
     iseq_addr = NULL;
 
+    DEBUG_PRINT("ruby: frame %d: checking stack_ptr=0x%lx vs last=0x%lx",
+                i, (unsigned long)stack_ptr, (unsigned long)last_stack_frame);
+
+    // Check if we've processed all frames before reading
+    if (stack_ptr >= last_stack_frame) {
+      DEBUG_PRINT("ruby: reached end of stack at frame %d", i);
+      *next_unwinder = PROG_UNWIND_NATIVE;
+      return ERR_OK;
+    }
+
     bpf_probe_read_user(&iseq_addr, sizeof(iseq_addr), (void *)(stack_ptr + rubyinfo->iseq));
     bpf_probe_read_user(&pc, sizeof(pc), (void *)(stack_ptr + rubyinfo->pc));
+
+    DEBUG_PRINT("ruby: frame %d: iseq_addr=0x%lx, pc=0x%lx",
+                i, (unsigned long)iseq_addr, (unsigned long)pc);
+
     // If iseq or pc is 0, then this frame represents a registered hook.
     // https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm.c#L1960
     if (pc == 0 || iseq_addr == NULL) {
+      DEBUG_PRINT("ruby: frame %d: native frame (pc=0 or iseq=NULL)", i);
       // Ruby frames without a PC or iseq are special frames and do not hold information
       // we can use further on. So we either skip them or ask the native unwinder to continue.
 
@@ -157,19 +191,24 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
         (RUBY_FRAME_FLAG_LAMBDA | RUBY_FRAME_FLAG_BMETHOD)) {
         // When identifying Ruby lambda blocks at this point, we do not want to return to the
         // native unwinder. So we just skip this Ruby VM frame.
+        DEBUG_PRINT("ruby: frame %d: lambda block, skipping", i);
         goto skip;
       }
 
+      DEBUG_PRINT("ruby: frame %d: switching to native unwinder", i);
       stack_ptr += rubyinfo->size_of_control_frame_struct;
       *next_unwinder = PROG_UNWIND_NATIVE;
       goto save_state;
     }
+
+    DEBUG_PRINT("ruby: frame %d: processing Ruby frame", i);
 
     if (bpf_probe_read_user(&iseq_body, sizeof(iseq_body), (void *)(iseq_addr + rubyinfo->body))) {
       DEBUG_PRINT("ruby: failed to get iseq body");
       increment_metric(metricID_UnwindRubyErrReadIseqBody);
       return ERR_RUBY_READ_ISEQ_BODY;
     }
+    DEBUG_PRINT("ruby: frame %d: iseq_body=0x%lx", i, (unsigned long)iseq_body);
 
     if (bpf_probe_read_user(
           &iseq_encoded, sizeof(iseq_encoded), (void *)(iseq_body + rubyinfo->iseq_encoded))) {
@@ -177,6 +216,7 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
       increment_metric(metricID_UnwindRubyErrReadIseqEncoded);
       return ERR_RUBY_READ_ISEQ_ENCODED;
     }
+    DEBUG_PRINT("ruby: frame %d: iseq_encoded=0x%lx", i, (unsigned long)iseq_encoded);
 
     if (bpf_probe_read_user(
           &iseq_size, sizeof(iseq_size), (void *)(iseq_body + rubyinfo->iseq_size))) {
@@ -184,6 +224,7 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
       increment_metric(metricID_UnwindRubyErrReadIseqSize);
       return ERR_RUBY_READ_ISEQ_SIZE;
     }
+    DEBUG_PRINT("ruby: frame %d: iseq_size=%u", i, iseq_size);
 
     // To get the line number iseq_encoded is subtracted from pc. This result also represents the
     // size of the current instruction sequence. If the calculated size of the instruction sequence
@@ -191,27 +232,27 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
     //
     // https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_backtrace.c#L47-L48
     n = (pc - iseq_encoded) / rubyinfo->size_of_value;
+    DEBUG_PRINT("ruby: frame %d: n=%ld (pc-iseq_encoded)/size_of_value", i, (long)n);
+
     if (n > iseq_size || n < 0) {
-      DEBUG_PRINT("ruby: skipping invalid instruction sequence");
+      DEBUG_PRINT("ruby: skipping invalid instruction sequence (n=%ld, iseq_size=%u)", (long)n, iseq_size);
       goto skip;
     }
 
     // For symbolization of the frame we forward the information about the instruction sequence
     // and program counter to user space.
     // From this we can then extract information like file or function name and line number.
+    DEBUG_PRINT("ruby: frame %d: pushing frame with iseq_body=0x%lx, pc=0x%lx",
+                i, (unsigned long)iseq_body, (unsigned long)pc);
     ErrorCode error = push_ruby(trace, (u64)iseq_body, pc);
     if (error) {
-      DEBUG_PRINT("ruby: failed to push frame");
+      DEBUG_PRINT("ruby: failed to push frame, error=%d", error);
       return error;
     }
+    DEBUG_PRINT("ruby: frame %d: successfully pushed Ruby frame", i);
     increment_metric(metricID_UnwindRubyFrames);
 
   skip:
-    if (last_stack_frame <= stack_ptr) {
-      // We have processed all frames in the Ruby VM and can stop here.
-      *next_unwinder = PROG_UNWIND_NATIVE;
-      return ERR_OK;
-    }
     stack_ptr += rubyinfo->size_of_control_frame_struct;
   }
   *next_unwinder = PROG_UNWIND_RUBY;
@@ -255,17 +296,29 @@ static EBPF_INLINE int unwind_ruby(struct pt_regs *ctx)
     // the offset to running_ec.
 
     void *single_main_ractor = NULL;
+    DEBUG_PRINT("ruby: reading ruby_single_main_ractor from GOT at 0x%lx",
+                (unsigned long)rubyinfo->current_ctx_ptr);
     if (bpf_probe_read_user(
           &single_main_ractor, sizeof(single_main_ractor), (void *)rubyinfo->current_ctx_ptr)) {
+      DEBUG_PRINT("ruby: failed to read ruby_single_main_ractor from GOT");
+      goto exit;
+    }
+    DEBUG_PRINT("ruby: ruby_single_main_ractor = 0x%lx", (unsigned long)single_main_ractor);
+
+    if (!single_main_ractor) {
+      DEBUG_PRINT("ruby: ruby_single_main_ractor is NULL");
       goto exit;
     }
 
+    DEBUG_PRINT("ruby: reading current_ctx from ractor+0x%x", rubyinfo->running_ec);
     if (bpf_probe_read_user(
           &current_ctx_addr,
           sizeof(current_ctx_addr),
           (void *)(single_main_ractor + rubyinfo->running_ec))) {
+      DEBUG_PRINT("ruby: failed to read current_ctx from ractor");
       goto exit;
     }
+    DEBUG_PRINT("ruby: current_ctx_addr = 0x%lx", (unsigned long)current_ctx_addr);
   } else {
     if (bpf_probe_read_user(
           &current_ctx_addr, sizeof(current_ctx_addr), (void *)rubyinfo->current_ctx_ptr)) {
@@ -274,13 +327,17 @@ static EBPF_INLINE int unwind_ruby(struct pt_regs *ctx)
   }
 
   if (!current_ctx_addr) {
+    DEBUG_PRINT("ruby: current_ctx_addr is NULL after reading");
     goto exit;
   }
 
+  DEBUG_PRINT("ruby: calling walk_ruby_stack with ctx_addr=0x%lx", (unsigned long)current_ctx_addr);
   error = walk_ruby_stack(record, rubyinfo, current_ctx_addr, &unwinder);
+  DEBUG_PRINT("ruby: walk_ruby_stack returned error=%d, next_unwinder=%d", error, unwinder);
 
 exit:
   record->state.unwind_error = error;
+  DEBUG_PRINT("ruby: tail_calling to unwinder=%d with error=%d", unwinder, error);
   tail_call(ctx, unwinder);
   return -1;
 }

@@ -648,6 +648,8 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	// the Linenos field.
 	pc := frame.Lineno
 
+	// log.Debugf("Ruby: Symbolizing frame with iseqBody=0x%x, pc=0x%x", iseqBody, pc)
+
 	key := rubyIseqBodyPC{
 		addr: iseqBody,
 		pc:   uint64(pc),
@@ -655,24 +657,32 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 
 	iseq, ok := r.iseqBodyPCToFunction.Get(key)
 	if !ok {
+		// log.Debugf("Ruby: Cache miss, extracting frame info for iseqBody=0x%x", iseqBody)
+
 		lineNo, err := r.getRubyLineNo(iseqBody, uint64(pc))
 		if err != nil {
+			// log.Debugf("Ruby: Failed to get line number: %v", err)
 			return err
 		}
+		// log.Debugf("Ruby: Extracted line number: %d", lineNo)
 
 		sourceFileNamePtr := r.rm.Ptr(iseqBody +
 			libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.pathobj))
 		sourceFileName, err := r.getStringCached(sourceFileNamePtr, r.readPathObjRealPath)
 		if err != nil {
+			// log.Debugf("Ruby: Failed to get source file name: %v", err)
 			return err
 		}
+		// log.Debugf("Ruby: Extracted source file: %s", sourceFileName)
 
 		funcNamePtr := r.rm.Ptr(iseqBody +
 			libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.base_label))
 		functionName, err := r.getStringCached(funcNamePtr, r.readRubyString)
 		if err != nil {
+			// log.Debugf("Ruby: Failed to get function name: %v", err)
 			return err
 		}
+		// log.Debugf("Ruby: Extracted function name: %s", functionName)
 
 		iseq = &rubyIseq{
 			functionName:   functionName,
@@ -680,6 +690,8 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 			line:           libpf.SourceLineno(lineNo),
 		}
 		r.iseqBodyPCToFunction.Add(key, iseq)
+	} else {
+		// log.Debugf("Ruby: Cache hit for iseqBody=0x%x", iseqBody)
 	}
 
 	// Ruby doesn't provide the information about the function offset for the
@@ -690,6 +702,11 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		SourceFile:   iseq.sourceFileName,
 		SourceLine:   iseq.line,
 	})
+
+	// Keep just the summary log
+	log.Debugf("Ruby: Symbolized %s:%d in %s",
+		iseq.functionName, iseq.line, iseq.sourceFileName)
+
 	sfCounter.ReportSuccess()
 	return nil
 }
@@ -787,9 +804,9 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 	// Reason for maximum supported version 3.2.x:
 	// - this is currently the newest stable version
 
-	minVer, maxVer := rubyVersion(2, 5, 0), rubyVersion(3, 3, 0)
+	minVer, maxVer := rubyVersion(2, 5, 0), rubyVersion(3, 6, 0)
 	if version < minVer || version >= maxVer {
-		return nil, fmt.Errorf("unsupported Ruby %d.%d.%d (need >= %d.%d.%d and <= %d.%d.%d)",
+		return nil, fmt.Errorf("ruby: unsupported version %d.%d.%d (need >= %d.%d.%d and <= %d.%d.%d)",
 			(version>>16)&0xff, (version>>8)&0xff, version&0xff,
 			(minVer>>16)&0xff, (minVer>>8)&0xff, minVer&0xff,
 			(maxVer>>16)&0xff, (maxVer>>8)&0xff, maxVer&0xff)
@@ -802,21 +819,70 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 	// symbols depending on the version.
 	// [0] https://github.com/ruby/ruby/commit/837fd5e494731d7d44786f29e7d6e8c27029806f
 	// [1] https://github.com/ruby/ruby/commit/79df14c04b452411b9d17e26a398e491bca1a811
-	currentCtxSymbol := libpf.SymbolName("ruby_single_main_ractor")
+
+	var currentCtxPtr libpf.Address
+
 	if version < rubyVersion(3, 0, 0) {
-		currentCtxSymbol = "ruby_current_execution_context_ptr"
-	}
-	currentCtxPtr, err := ef.LookupSymbolAddress(currentCtxSymbol)
-	if err != nil {
-		return nil, fmt.Errorf("%v not found: %v", currentCtxSymbol, err)
+		// Ruby < 3.0: Use ruby_current_execution_context_ptr directly
+		currentCtxSymbol := libpf.SymbolName("ruby_current_execution_context_ptr")
+		addr, err := ef.LookupSymbolAddress(currentCtxSymbol)
+		if err != nil {
+			return nil, fmt.Errorf("ruby: %v not found: %v", currentCtxSymbol, err)
+		}
+		currentCtxPtr = libpf.Address(addr)
+	} else if version < rubyVersion(3, 3, 0) {
+		// Ruby 3.0-3.2: Use ruby_single_main_ractor directly
+		currentCtxSymbol := libpf.SymbolName("ruby_single_main_ractor")
+		addr, err := ef.LookupSymbolAddress(currentCtxSymbol)
+		if err != nil {
+			return nil, fmt.Errorf("ruby: %v not found: %v", currentCtxSymbol, err)
+		}
+		currentCtxPtr = libpf.Address(addr)
+	} else {
+		// Ruby 3.3+: ruby_single_main_ractor is hidden, but we can find it in the symbol table
+		log.Debugf("Ruby %d.%d.%d detected, looking for ruby_single_main_ractor in symbol table",
+			(version>>16)&0xff, (version>>8)&0xff, version&0xff)
+
+		// Try to find ruby_single_main_ractor in the full symbol table (not just dynamic symbols)
+		symMap, err := ef.ReadSymbols()
+		if err != nil {
+			log.Debugf("ruby: failed to read symbol table: %v", err)
+			// TODO: Fall back to disassembly approach?
+			// sym, code, err := ef.SymbolData("rb_thread_main", 256)
+			// if err != nil {
+			return nil, fmt.Errorf("ruby: unable to read 'rb_thread_main': %w", err)
+			// }
+
+			// log.Debugf("ruby: rb_thread_main at file offset 0x%x, falling back to disassembly", sym.Address)
+
+			// // Extract the GOT entry offset from the disassembly
+			// gotEntryOffset, err := extractRubySingleMainRactor(code, sym.Address)
+			// if err != nil {
+			// 	return nil, fmt.Errorf("ruby: failed to extract ruby_single_main_ractor GOT offset: %w", err)
+			// }
+
+			// currentCtxPtr = libpf.Address(gotEntryOffset)
+			// log.Debugf("ruby: ruby_single_main_ractor GOT entry at offset 0x%x (will be resolved at runtime)", currentCtxPtr)
+		} else {
+			// Look for ruby_single_main_ractor in the symbol table
+			ractorSym, err := symMap.LookupSymbol("ruby_single_main_ractor")
+			if err != nil {
+				log.Debugf("ruby: ruby_single_main_ractor not found in symbol table: %v", err)
+				return nil, fmt.Errorf("ruby: ruby_single_main_ractor not found in symbol table")
+			}
+
+			currentCtxPtr = libpf.Address(ractorSym.Address)
+			log.Debugf("ruby: found ruby_single_main_ractor at 0x%x in symbol table", currentCtxPtr)
+		}
 	}
 
 	// rb_vm_exec is used to execute the Ruby frames in the Ruby VM and is called within
 	// ruby_run_node  which is the main executor function since Ruby v1.9.0
 	// https://github.com/ruby/ruby/blob/587e6800086764a1b7c959976acef33e230dccc2/main.c#L47
+	// For Ruby 3.3+, rb_vm_exec is static, so we use ruby_run_node instead
 	symbolName := libpf.SymbolName("rb_vm_exec")
-	if version < rubyVersion(2, 6, 0) {
-		symbolName = libpf.SymbolName("ruby_exec_node")
+	if version >= rubyVersion(3, 3, 0) {
+		symbolName = libpf.SymbolName("ruby_run_node")
 	}
 	interpRanges, err := info.GetSymbolAsRanges(symbolName)
 	if err != nil {
@@ -825,7 +891,7 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 
 	rid := &rubyData{
 		version:       version,
-		currentCtxPtr: libpf.Address(currentCtxPtr),
+		currentCtxPtr: currentCtxPtr,
 	}
 
 	vms := &rid.vmStructs
@@ -847,6 +913,9 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 		// With Ruby 2.6 the field bp was added to rb_control_frame_t
 		// https://github.com/ruby/ruby/commit/ed935aa5be0e5e6b8d53c3e7d76a9ce395dfa18b
 		vms.control_frame_struct.size_of_control_frame_struct = 56
+	case version >= rubyVersion(3, 4, 0) && runtime.GOARCH == "arm64":
+		// Ruby 3.4 on ARM64 has different struct size
+		vms.control_frame_struct.size_of_control_frame_struct = 56 // 0x38
 	default:
 		// 3.1 adds new jit_return field at the end.
 		// https://github.com/ruby/ruby/commit/9d8cc01b758f9385bd4c806f3daff9719e07faa0
@@ -869,6 +938,12 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 		vms.iseq_constant_body.insn_info_size = 136
 		vms.iseq_constant_body.succ_index_table = 144
 		vms.iseq_constant_body.size_of_iseq_constant_body = 312
+	case version >= rubyVersion(3, 4, 0) && runtime.GOARCH == "arm64":
+		// Ruby 3.4 on ARM64 has different struct sizes
+		vms.iseq_constant_body.insn_info_body = 112
+		vms.iseq_constant_body.insn_info_size = 128
+		vms.iseq_constant_body.succ_index_table = 136
+		vms.iseq_constant_body.size_of_iseq_constant_body = 352 // 0x160
 	default:
 		vms.iseq_constant_body.insn_info_body = 112
 		vms.iseq_constant_body.insn_info_size = 128
@@ -901,27 +976,52 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 		vms.iseq_insn_info_entry.size_of_line_no = 4
 		vms.iseq_insn_info_entry.size_of_iseq_insn_info_entry = 12
 	}
+
+	// Set rstring_struct offsets based on Ruby version
 	if version < rubyVersion(3, 2, 0) {
 		vms.rstring_struct.as_ary = 16
+		vms.rstring_struct.as_heap_ptr = 24
 	} else {
-		vms.rstring_struct.as_ary = 24
+		// Ruby 3.2+ and Ruby 3.4 on ARM64 both use these values
+		vms.rstring_struct.as_ary = 24      // 0x18
+		vms.rstring_struct.as_heap_ptr = 24 // 0x18
 	}
-	vms.rstring_struct.as_heap_ptr = 24
 
 	vms.rarray_struct.as_ary = 16
 	vms.rarray_struct.as_heap_ptr = 32
 
-	vms.succ_index_table_struct.small_block_ranks = 8
-	vms.succ_index_table_struct.block_bits = 16
-	vms.succ_index_table_struct.succ_part = 48
-	vms.succ_index_table_struct.size_of_succ_dict_block = 80
-	vms.size_of_immediate_table = 54
+	switch {
+	case version < rubyVersion(3, 1, 0):
+		vms.succ_index_table_struct.small_block_ranks = 8
+		vms.succ_index_table_struct.block_bits = 16
+		vms.succ_index_table_struct.succ_part = 48
+		vms.succ_index_table_struct.size_of_succ_dict_block = 80
+		vms.size_of_immediate_table = 54
+	case version >= rubyVersion(3, 4, 0) && runtime.GOARCH == "arm64":
+		// Ruby 3.4 on ARM64 has these specific values from GDB
+		vms.succ_index_table_struct.small_block_ranks = 8
+		vms.succ_index_table_struct.block_bits = 16
+		vms.succ_index_table_struct.succ_part = 48
+		vms.succ_index_table_struct.size_of_succ_dict_block = 80
+		vms.size_of_immediate_table = 54
+	default:
+		// https://github.com/ruby/ruby/commit/f6e5a993c7e7c4645d5ac48bf8a7e67e6bed0a4f
+		vms.succ_index_table_struct.small_block_ranks = 0
+		vms.succ_index_table_struct.block_bits = 0
+		vms.succ_index_table_struct.succ_part = 0
+		vms.succ_index_table_struct.size_of_succ_dict_block = 0
+		vms.size_of_immediate_table = 0
+	}
 
 	vms.size_of_value = 8
 
 	if version >= rubyVersion(3, 0, 0) {
-		if runtime.GOARCH == "amd64" {
-			vms.rb_ractor_struct.running_ec = 0x208
+		// Set the running_ec offset within rb_ractor_struct
+		// For Ruby 3.4 on arm64, the offset is 400 (0x190)
+		if version >= rubyVersion(3, 4, 0) && runtime.GOARCH == "arm64" {
+			vms.rb_ractor_struct.running_ec = 400 // 0x190 - correct value from GDB
+		} else if runtime.GOARCH == "amd64" {
+			vms.rb_ractor_struct.running_ec = 0x188 // 392 for Ruby 3.3+ on amd64
 		} else {
 			vms.rb_ractor_struct.running_ec = 0x218
 		}
