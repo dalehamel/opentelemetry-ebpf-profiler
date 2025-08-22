@@ -17,6 +17,7 @@ bpf_map_def SEC("maps") ruby_procs = {
 // The number of Ruby frames to unwind per frame-unwinding eBPF program. If
 // we start running out of instructions in the walk_ruby_stack program, one
 // option is to adjust this number downwards.
+// NOTE the maximum size stack is this times 33
 #define FRAMES_PER_WALK_RUBY_STACK 27
 
 // Ruby VM frame flags are internal indicators for the VM interpreter to
@@ -25,8 +26,8 @@ bpf_map_def SEC("maps") ruby_procs = {
 #define RUBY_FRAME_FLAG_BMETHOD 0x0040
 #define RUBY_FRAME_FLAG_LAMBDA  0x0100
 
-// Record a Ruby frame
-static EBPF_INLINE ErrorCode push_ruby(Trace *trace, u64 file, u64 line)
+// Record a Ruby cfp frame
+static EBPF_INLINE ErrorCode push_ruby_cfp(Trace *trace, u64 file, u64 line)
 {
   return _push(trace, file, line, FRAME_MARKER_RUBY);
 }
@@ -39,8 +40,21 @@ static EBPF_INLINE ErrorCode push_ruby(Trace *trace, u64 file, u64 line)
 // as well as to the current call frame pointer (cfp).
 // On the Ruby VM stack we have for each cfp one struct [1]. These cfp structs then point to
 // instruction sequence (iseq) structs [2] that store the information about file and function name
-// that we forward to user space for the symbolization process of the frame.
+// that we forward to user space for the symbolization process of the frame, or they may
+// point to a callable method entry (cme) [3]. In the Ruby's own backtrace functions, they
+// may store either of these [4]. In the case of a cme, since ruby 3.3.0 [5] class names
+// have been stored as an easily accessible struct member on the classext, accessible
+// through the cme. We will check the frame for IMEMO_MENT to see if it is a cme frame,
+// and if so we will try to get the classname. The iseq body is accessible through
+// additional indirection of the cme, so we can still get the file and function names
+// through the existing method.
 //
+// If the frame is a cme, we will push it with a separate frame type to userspace
+// so that the Symbolizer will know what type of pointer we have given it, and
+// can search the struct at the right offsets for the classpath and iseq body.
+//
+// If the frame is the iseq type, the original logic of just extracting the function
+// and file names and line numbers is executed.
 //
 // [0] rb_execution_context_struct
 // https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L843
@@ -48,8 +62,15 @@ static EBPF_INLINE ErrorCode push_ruby(Trace *trace, u64 file, u64 line)
 // [1] rb_control_frame_struct
 // https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L760
 //
-// [2] rb_iseq_struct
-// https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L456
+// [3] rb_callable_method_entry_struct
+// https://github.com/ruby/ruby/blob/fd59ac6410d0cc93a8baaa42df77491abdb2e9b6/method.h#L63-L69
+//
+// [4] thread_profile_frames frame storage of cme or iseq
+// https://github.com/ruby/ruby/blob/fd59ac6410d0cc93a8baaa42df77491abdb2e9b6/vm_backtrace.c#L1754-L1761
+//
+// [5] classpath stored as struct member instead of ivar
+// https://github.com/ruby/ruby/commit/abff5f62037284024aaf469fc46a6e8de98fa1e3
+
 static EBPF_INLINE ErrorCode walk_ruby_stack(
   PerCPURecord *record,
   const RubyProcInfo *rubyinfo,
@@ -200,7 +221,7 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
     // For symbolization of the frame we forward the information about the instruction sequence
     // and program counter to user space.
     // From this we can then extract information like file or function name and line number.
-    ErrorCode error = push_ruby(trace, (u64)iseq_body, pc);
+    ErrorCode error = push_ruby_cfp(trace, (u64)stack_ptr, pc);
     if (error) {
       DEBUG_PRINT("ruby: failed to push frame");
       return error;
