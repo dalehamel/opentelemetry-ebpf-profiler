@@ -34,16 +34,17 @@ bpf_map_def SEC("maps") ruby_procs = {
 #define IMEMO_MENT              6
 
 // Flags to check the frame type
-#define VM_FRAME_MAGIC_METHOD   0x11110001
-#define VM_FRAME_MAGIC_MASK     0x7fff0001
+#define VM_FRAME_MAGIC_METHOD 0x11110001
+#define VM_FRAME_MAGIC_MASK   0x7fff0001
 
 // https://github.com/ruby/ruby/blob/2083fa89fc29005035c1a098185c4b707686a437/vm_core.h#L1415-L1416
-#define VM_ENV_DATA_INDEX_ME_CREF    (-2 * sizeof(size_t)) /* ep[-2] */ // NOTE - we do byte-indexing in kernel space, but array in userspace is usize
-#define VM_ENV_DATA_INDEX_SPECVAL    (-1 * sizeof(size_t)) /* ep[-1] */
+// NOTE - we do byte-indexing in kernel space, but array in userspace offsets by type size
+#define VM_ENV_DATA_INDEX_ME_CREF (-2 * sizeof(size_t)) /* ep[-2] */
+#define VM_ENV_DATA_INDEX_SPECVAL (-1 * sizeof(size_t)) /* ep[-1] */
 
 // Offset is the size of VALUE
 // https://github.com/ruby/ruby/blob/5257e1298c4dc4e854eaa0a9fe5e6dc5c1495c91/internal/imemo.h#L48-L55
-#define VM_SVAR_CREF_OFFSET     8
+#define VM_SVAR_CREF_OFFSET 8
 
 // Record a Ruby iseq frame
 static EBPF_INLINE ErrorCode push_ruby_iseq(Trace *trace, u64 file, u64 line)
@@ -51,19 +52,18 @@ static EBPF_INLINE ErrorCode push_ruby_iseq(Trace *trace, u64 file, u64 line)
   return _push(trace, file, line, FRAME_MARKER_RUBY);
 }
 
-
 // Record a Ruby CME frame
 static EBPF_INLINE ErrorCode push_ruby_cme(Trace *trace, u64 file, u64 line)
 {
   return _push(trace, file, line, FRAME_MARKER_RUBY_CME);
 }
 
-
 // Check for ruby method entry
 static EBPF_INLINE u64 check_method_entry(u64 env_me_cref, int can_be_svar)
 {
+  // should be at offset 0 on the struct, and size of VALUE, so u64 should fit it
+  u64 rbasic_flags = 0;
   u64 env_cme_cref = 0;
-  u64 rbasic_flags = 0; // should be at offset 0 on the struct, and size of VALUE, so u64 should fit it
 
   if (bpf_probe_read_user(&rbasic_flags, sizeof(rbasic_flags), (void *)(env_me_cref))) {
     DEBUG_PRINT("ruby: failed to read flags to check method entry");
@@ -73,40 +73,35 @@ static EBPF_INLINE u64 check_method_entry(u64 env_me_cref, int can_be_svar)
 
   u64 imemo_type = (rbasic_flags >> RUBY_FL_USHIFT) & IMEMO_MASK;
 
-  switch(imemo_type) {
-    case IMEMO_MENT:
-      DEBUG_PRINT("ruby: imemo type is method entry");
-      return env_me_cref;
-    case IMEMO_CREF:
-      return 0;
-    case IMEMO_SVAR:
-      if (can_be_svar) {
+  switch (imemo_type) {
+  case IMEMO_MENT: DEBUG_PRINT("ruby: imemo type is method entry"); return env_me_cref;
+  case IMEMO_CREF: return 0;
+  case IMEMO_SVAR:
+    if (can_be_svar) {
 
-        u64 cref_or_me = 0; // should be at offset 8 on the struct, (size of value)
+      u64 cref_or_me = 0; // should be at offset 8 on the struct, (size of value)
 
-        if (bpf_probe_read_user(&cref_or_me, sizeof(cref_or_me), (void *)(env_cme_cref + VM_SVAR_CREF_OFFSET))) {
-          DEBUG_PRINT("ruby: failed to read svar.cref_or_me");
-          increment_metric(metricID_UnwindRubyErrReadMethodEntryFromSvar);
+      if (bpf_probe_read_user(
+            &cref_or_me, sizeof(cref_or_me), (void *)(env_cme_cref + VM_SVAR_CREF_OFFSET))) {
+        DEBUG_PRINT("ruby: failed to read svar.cref_or_me");
+        increment_metric(metricID_UnwindRubyErrReadMethodEntryFromSvar);
 
-          return 0;
-        }
-        return check_method_entry(cref_or_me, 0);
+        return 0;
       }
+      return check_method_entry(cref_or_me, 0);
+    }
   }
   return 0;
 }
 
-static EBPF_INLINE ErrorCode read_cme_frame(
-  PerCPURecord *record,
-  const RubyProcInfo *rubyinfo,
-  void *stack_ptr,
-  u64 pc)
+static EBPF_INLINE ErrorCode
+read_cme_frame(PerCPURecord *record, const RubyProcInfo *rubyinfo, void *stack_ptr, u64 pc)
 {
   Trace *trace = &record->trace;
   u64 check_ep, ep = 0;
-  u64 flags = 0;
-  u64 env_specval = 0;
-  u64 env_me_cref = 0;
+  u64 flags        = 0;
+  u64 env_specval  = 0;
+  u64 env_me_cref  = 0;
   u64 method_entry = 0;
 
   if (bpf_probe_read_user(&ep, sizeof(ep), (void *)(stack_ptr + rubyinfo->ep))) {
@@ -127,13 +122,15 @@ static EBPF_INLINE ErrorCode read_cme_frame(
     return ERR_RUBY_FIND_CME;
   }
 
-  if (bpf_probe_read_user(&env_specval, sizeof(env_specval), (void *)(ep + VM_ENV_DATA_INDEX_SPECVAL))) {
+  if (bpf_probe_read_user(
+        &env_specval, sizeof(env_specval), (void *)(ep + VM_ENV_DATA_INDEX_SPECVAL))) {
     DEBUG_PRINT("ruby: failed to get env_specval");
     increment_metric(metricID_UnwindRubyErrReadEnvSpecval);
     return ERR_RUBY_FIND_CME;
   }
 
-  if (bpf_probe_read_user(&env_me_cref, sizeof(env_me_cref), (void *)(ep + VM_ENV_DATA_INDEX_ME_CREF))) {
+  if (bpf_probe_read_user(
+        &env_me_cref, sizeof(env_me_cref), (void *)(ep + VM_ENV_DATA_INDEX_ME_CREF))) {
     DEBUG_PRINT("ruby: failed to get env_me_cref");
     increment_metric(metricID_UnwindRubyErrReadEnvMeCref);
     return ERR_RUBY_FIND_CME;
@@ -149,13 +146,15 @@ static EBPF_INLINE ErrorCode read_cme_frame(
         goto emit_cme;
       }
       check_ep = env_specval; // VM_ENV_PREV_EP
-      if (bpf_probe_read_user(&env_specval, sizeof(env_specval), (void *)(check_ep + VM_ENV_DATA_INDEX_SPECVAL))) {
+      if (bpf_probe_read_user(
+            &env_specval, sizeof(env_specval), (void *)(check_ep + VM_ENV_DATA_INDEX_SPECVAL))) {
         DEBUG_PRINT("ruby: failed to get specval");
         increment_metric(metricID_UnwindRubyErrReadEnvSpecval);
         return ERR_RUBY_FIND_LOCAL_FRAME;
       }
 
-      if (bpf_probe_read_user(&env_me_cref, sizeof(env_me_cref), (void *)(check_ep + VM_ENV_DATA_INDEX_ME_CREF))) {
+      if (bpf_probe_read_user(
+            &env_me_cref, sizeof(env_me_cref), (void *)(check_ep + VM_ENV_DATA_INDEX_ME_CREF))) {
         DEBUG_PRINT("ruby: failed to get me_cref");
         increment_metric(metricID_UnwindRubyErrReadEp);
         increment_metric(metricID_UnwindRubyErrReadEnvMeCref);
@@ -193,7 +192,6 @@ emit_cme:
     return error;
   }
   increment_metric(metricID_UnwindRubyFrames);
-
 
   return ERR_OK;
 }
