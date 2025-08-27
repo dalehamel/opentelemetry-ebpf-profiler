@@ -65,8 +65,12 @@ static EBPF_INLINE u64 check_method_entry(u64 env_me_cref, int can_be_svar)
   u64 rbasic_flags = 0;
   u64 env_cme_cref = 0;
 
+  if (env_me_cref == 0)
+    return 0;
+
+  DEBUG_PRINT("ruby: checking %08x, %d", env_me_cref, can_be_svar);
   if (bpf_probe_read_user(&rbasic_flags, sizeof(rbasic_flags), (void *)(env_me_cref))) {
-    DEBUG_PRINT("ruby: failed to read flags to check method entry");
+    DEBUG_PRINT("ruby: failed to read flags to check method entry %08x", env_me_cref);
     increment_metric(metricID_UnwindRubyErrReadCMEFlags);
     return 0;
   }
@@ -110,18 +114,6 @@ read_cme_frame(PerCPURecord *record, const RubyProcInfo *rubyinfo, void *stack_p
     return ERR_RUBY_READ_EP;
   }
 
-  if (bpf_probe_read_user(&flags, sizeof(flags), (void *)(ep))) {
-    DEBUG_PRINT("ruby: failed to get flags");
-    increment_metric(metricID_UnwindRubyErrReadEp);
-    return ERR_RUBY_FIND_CME;
-  }
-
-  if ((flags & VM_FRAME_MAGIC_MASK) != VM_FRAME_MAGIC_METHOD) {
-    // If the magic frame type is not method there is no class to read
-    // so just skip to just checking the iseq for the method name
-    return ERR_RUBY_FIND_CME;
-  }
-
   if (bpf_probe_read_user(
         &env_specval, sizeof(env_specval), (void *)(ep + VM_ENV_DATA_INDEX_SPECVAL))) {
     DEBUG_PRINT("ruby: failed to get env_specval");
@@ -140,7 +132,14 @@ read_cme_frame(PerCPURecord *record, const RubyProcInfo *rubyinfo, void *stack_p
 
   UNROLL for (u32 i = 0; i < CME_MAX_CHECK_FRAMES; ++i)
   {
-    if ((env_specval & VM_ENV_FLAG_LOCAL) != 0) {
+
+    if (bpf_probe_read_user(&flags, sizeof(flags), (void *)(check_ep))) {
+      DEBUG_PRINT("ruby: failed to get flags");
+      increment_metric(metricID_UnwindRubyErrReadEp);
+      return ERR_RUBY_FIND_CME;
+    }
+    DEBUG_PRINT("%d %08x %08x %08x", i, flags, env_specval, env_me_cref);
+    if ((flags & VM_ENV_FLAG_LOCAL) != 0) {
       method_entry = check_method_entry(env_me_cref, 0);
       if (method_entry != 0) {
         goto emit_cme;
@@ -176,6 +175,19 @@ read_cme_frame(PerCPURecord *record, const RubyProcInfo *rubyinfo, void *stack_p
 
   method_entry = check_method_entry(env_me_cref, 1);
   DEBUG_PRINT("ruby: method_entry found at %x", method_entry);
+
+  if (bpf_probe_read_user(&flags, sizeof(flags), (void *)(check_ep))) {
+    DEBUG_PRINT("ruby: failed to get flags");
+    increment_metric(metricID_UnwindRubyErrReadEp);
+    return ERR_RUBY_FIND_CME;
+  }
+
+  if ((flags & VM_FRAME_MAGIC_MASK) != VM_FRAME_MAGIC_METHOD) {
+    DEBUG_PRINT("ruby: not a method!");
+    // If the magic frame type is not method there is no class to read
+    // so just skip to just checking the iseq for the method name
+    return ERR_RUBY_FIND_CME;
+  }
 
   if (method_entry != 0) {
     goto emit_cme;

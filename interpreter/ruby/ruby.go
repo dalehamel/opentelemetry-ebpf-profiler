@@ -127,7 +127,7 @@ type rubyData struct {
 		// rb_iseq_location_struct
 		// https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L272
 		iseq_location_struct struct {
-			pathobj, base_label uint8
+			pathobj, base_label, label uint8
 		}
 
 		// succ_index_table_struct
@@ -172,122 +172,27 @@ type rubyData struct {
 			running_ec uint16
 		}
 
-//struct rb_method_definition_struct {
-//        rb_method_type_t           type:4;               /*     0: 0  4 */
-//        unsigned int               iseq_overload:1;      /*     0: 4  4 */
-//        unsigned int               no_redef_warning:1;   /*     0: 5  4 */
-//        unsigned int               aliased:1;            /*     0: 6  4 */
-//
-//        /* XXX 25 bits hole, try to pack */
-//
-//        /* Force alignment to the next boundary: */
-//        int                        :0;
-//
-//        int                        reference_count:28;   /*     4: 0  4 */
-//
-//        /* XXX 4 bits hole, try to pack */
-//
-//        union {
-//                rb_method_iseq_t   iseq;                 /*     8    16 */
-//                rb_method_cfunc_t  cfunc;                /*     8    24 */
-//                rb_method_attr_t   attr;                 /*     8    16 */
-//                rb_method_alias_t  alias;                /*     8     8 */
-//                rb_method_refined_t refined;             /*     8     8 */
-//                rb_method_bmethod_t bmethod;             /*     8    24 */
-//                rb_method_optimized_t optimized;         /*     8     8 */
-//        } body;                                          /*     8    24 */
-//        ID                         original_id;          /*    32     8 */
-//        uintptr_t                  method_serial;        /*    40     8 */
-//
-//        /* size: 48, cachelines: 1, members: 8 */
-//        /* sum members: 40 */
-//        /* sum bitfield members: 35 bits, bit holes: 2, sum bit holes: 29 bits */
-//        /* last cacheline: 48 bytes */
-//};
+		// TODO add links to the structs
+		// https://github.com/ruby/ruby/blob/fd59ac6410d0cc93a8baaa42df77491abdb2e9b6/method.h#L63-L69
+		rb_method_entry_struct struct {
+			flags, defined_class, def uint8
+		}
 
-//struct rb_method_iseq_struct {
-//        const rb_iseq_t  *         iseqptr;              /*     0     8 */
-//        rb_cref_t *                cref;                 /*     8     8 */
-//
-//        /* size: 16, cachelines: 1, members: 2 */
-//        /* last cacheline: 16 bytes */
-//};
+		rclass_and_rb_classext_t struct {
+			classext uint8
+		}
 
-//struct rb_iseq_struct {
-//        VALUE                      flags;                /*     0     8 */
-//        VALUE                      wrapper;              /*     8     8 */
-//        struct rb_iseq_constant_body * body;             /*    16     8 */                                                                                                               union {
-//                struct iseq_compile_data * compile_data; /*    24     8 */
-//                struct {
-//                        VALUE      obj;                  /*    24     8 */                                                                                                                               int        index;                /*    32     4 */
-//                } loader;                                /*    24    16 */
-//                struct {
-//                        struct rb_hook_list_struct * local_hooks; /*    24     8 */
-//                        rb_event_flag_t global_trace_events; /*    32     4 */
-//                } exec;                                  /*    24    16 */
-//        } aux;                                           /*    24    16 */
-//
-//        /* size: 40, cachelines: 1, members: 4 */
-//        /* last cacheline: 40 bytes */
-//};
+		rb_classext_struct struct {
+			classpath uint8
+		}
 
+		rb_method_definition_struct struct {
+			method_type, body uint8
+		}
 
-//		struct rb_method_entry_struct {
-//        VALUE                      flags;                /*     0     8 */
-//        VALUE                      defined_class;        /*     8     8 */
-//        const struct rb_method_definition_struct * def;  /*    16     8 */                                                                                                               ID                         called_id;            /*    24     8 */
-//        VALUE                      owner;                /*    32     8 */
-//
-//        /* size: 40, cachelines: 1, members: 5 */                                                                                                                                        /* last cacheline: 40 bytes */
-//};
-
-//struct RClass_and_rb_classext_t {
-//        struct RClass              rclass __attribute__((__aligned__(8))); /*     0    32 */
-//        rb_classext_t              classext;             /*    32   128 */
-//                                                                                                                                                                                         /* size: 160, cachelines: 3, members: 2 */
-//        /* forced alignments: 1 */
-//        /* last cacheline: 32 bytes */
-//} __attribute__((__aligned__(8)));
-
-//struct rb_classext_struct {
-//        VALUE *                    iv_ptr;               /*     0     8 */
-//        struct rb_id_table *       const_tbl;            /*     8     8 */
-//        struct rb_id_table *       callable_m_tbl;       /*    16     8 */
-//        struct rb_id_table *       cc_tbl;               /*    24     8 */
-//        struct rb_id_table *       cvc_tbl;              /*    32     8 */
-//        size_t                     superclass_depth;     /*    40     8 */
-//        VALUE *                    superclasses;         /*    48     8 */                                                                                                               struct rb_subclass_entry * subclasses;           /*    56     8 */
-//        /* --- cacheline 1 boundary (64 bytes) --- */
-//        struct rb_subclass_entry * subclass_entry;       /*    64     8 */
-//        struct rb_subclass_entry * module_subclass_entry; /*    72     8 */
-//        const VALUE                origin_;              /*    80     8 */
-//        const VALUE                refined_class;        /*    88     8 */
-//        union {
-//                struct {
-//                        rb_alloc_func_t allocator;       /*    96     8 */
-//                } class;                                 /*    96     8 */
-//                struct {
-//                        VALUE      attached_object;      /*    96     8 */
-//                } singleton_class;                       /*    96     8 */
-//        } as;                                            /*    96     8 */
-//        const VALUE                includer;             /*   104     8 */
-//        attr_index_t               max_iv_count;         /*   112     4 */
-//        unsigned char              variation_count;      /*   116     1 */
-//        _Bool                      permanent_classpath:1; /*   117: 0  1 */
-//        _Bool                      cloned:1;             /*   117: 1  1 */
-//
-//        /* XXX 6 bits hole, try to pack */
-//        /* XXX 2 bytes hole, try to pack */
-//
-//        VALUE                      classpath;            /*   120     8 */
-//
-//        /* size: 128, cachelines: 2, members: 19 */
-//        /* sum members: 125, holes: 1, sum holes: 2 */
-//        /* sum bitfield members: 2 bits, bit holes: 1, sum bit holes: 6 bits */
-//};
-
-
-
+		rb_method_iseq_struct struct {
+			iseqptr uint8
+		}
 	}
 }
 
@@ -750,10 +655,60 @@ func (r *rubyInstance) getRubyLineNo(iseqBody libpf.Address, pc uint64) (uint32,
 	return lineNo, nil
 }
 
+func (r *rubyInstance) processCmeFrame(frame *host.Frame) (libpf.String, libpf.Address, error) {
+	// Get the classpath, and figure out the iseq body offset from the definition
+	// so that we can get the name and line number as below
+
+	var classPath libpf.String
+	var iseqBody libpf.Address
+	var err error
+
+	vms := &r.r.vmStructs
+	cmeAddr := libpf.Address(frame.File)
+	log.Debugf("Got Ruby CME frame %X, %X", cmeAddr, frame.File)
+	//cmeFlags := r.rm.Ptr(cmeAddr + vms.rb_method_entry_struct.flags) // TODO Check imemo
+
+	classDefinition := r.rm.Ptr(cmeAddr + libpf.Address(vms.rb_method_entry_struct.defined_class))
+	log.Debugf("Class def %x", classDefinition)
+
+	classFlags := r.rm.Ptr(classDefinition)
+	classMask := classFlags & rubyTMask
+
+	if classMask == rubyTClass { // note we can also get iclass here (0x1c) but we don't seem to be able to read those
+		classpathAddr := classDefinition + libpf.Address(vms.rclass_and_rb_classext_t.classext+vms.rb_classext_struct.classpath)
+		classpathPtr := r.rm.Ptr(classpathAddr)
+		classPath, err = r.getStringCached(classpathPtr, r.readRubyString)
+		if err != nil {
+			log.Errorf("unable to read classpath string %x %v", classpathPtr, err)
+		} else {
+			log.Debugf("read classpath %s from cme", classPath)
+		}
+	}
+
+	vmMethodTypeIseq := uint32(0) // VM_METHOD_TYPE_ISEQ = 0
+	methodDefinition := r.rm.Ptr(cmeAddr + libpf.Address(vms.rb_method_entry_struct.def))
+	log.Debugf("Method def %x", methodDefinition)
+
+	// TODO verify size is 4
+	methodType := r.rm.Uint32(methodDefinition + libpf.Address(vms.rb_method_definition_struct.method_type))
+	log.Debugf("Method type %x", methodType)
+
+	if methodType == vmMethodTypeIseq {
+		methodBody := r.rm.Ptr(methodDefinition + libpf.Address(vms.rb_method_definition_struct.body))
+		log.Debugf("Method body %x", methodBody)
+
+		iseqBody = r.rm.Ptr(methodBody + libpf.Address(vms.rb_method_iseq_struct.iseqptr+vms.iseq_struct.body))
+	} else {
+		// This is actually a fatal error, we expect to be able to at least get the iseq body from the CME
+		log.Errorf("unexpected method type %08x, expected iseq type %08x", methodType, vmMethodTypeIseq)
+		return classPath, iseqBody, fmt.Errorf("unable to read iseq body from cme")
+	}
+
+	return classPath, iseqBody, nil
+}
+
 func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error {
-	log.Warnf("HERE2 %+v", frame)
-	if !frame.Type.IsInterpType(libpf.Ruby) && !frame.Type.IsInterpType(libpf.RubyCME){
-		log.Warnf("NOT RUBY FRAME %+v", frame)
+	if !frame.Type.IsInterpType(libpf.Ruby) && !frame.Type.IsInterpType(libpf.RubyCME) {
 		return interpreter.ErrMismatchInterpreterType
 	}
 	vms := &r.r.vmStructs
@@ -761,62 +716,14 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	sfCounter := successfailurecounter.New(&r.successCount, &r.failCount)
 	defer sfCounter.DefaultToFailure()
 
-	var iseqBody libpf.Address;
-	var classPath libpf.String;
+	var iseqBody libpf.Address
+	var classPath libpf.String
 
 	if frame.Type.IsInterpType(libpf.RubyCME) {
-		// Get the classpath, and figure out the iseq body offset from the definition
-		// so that we can get the name and line number as below
-
-		var classname libpf.String
 		var err error
-		cmeAddr := libpf.Address(frame.File)
-		log.Warnf("GOT Ruby CME frame %X, %X", cmeAddr, frame.File)
-		//cmeFlags := r.rm.Ptr(cmeAddr) // TODO Check imemo
-
-		definedClassOffset := 8
-		classDefinition := r.rm.Ptr(cmeAddr + libpf.Address(definedClassOffset))
-		log.Warnf("Class def %x", classDefinition)
-
-		classFlags := r.rm.Ptr(classDefinition)
-		classMask := classFlags & rubyTMask 
-
-		if classMask == rubyTClass { // note we can also get iclass here (0x1c) but we don't seem to be able to read those
-			classExtOffset := 32 // TODO update vmstructs with these offsets
-			classpathOffset := 120
-
-			classnameAddr := classDefinition + libpf.Address(classExtOffset + classpathOffset)
-			log.Warnf("Class classnameAddr %x", classnameAddr)
-			classnamePtr := r.rm.Ptr(classnameAddr)
-			log.Warnf("Class classnameAddr %x %x %x", classDefinition, classnameAddr, classnamePtr)
-			classname, err = r.getStringCached(classnamePtr, r.readRubyString)
-			if err != nil {
-				log.Errorf("ERROR %x %v", classnamePtr, err)
-			} else {
-				log.Warnf("GOT CLASSNAME %s", classname)
-				classPath = classname
-			}
-		}
-
-		// VM_METHOD_TYPE_ISEQ = 0
-		vmMethodTypeIseq := uint32(0)
-		methodDefOffset := 16
-		methodDefinition := r.rm.Ptr(cmeAddr + libpf.Address(methodDefOffset))
-		log.Warnf("Method def %x", methodDefinition)
-
-		methodType := r.rm.Uint32(methodDefinition)
-		log.Warnf("Method type %x", methodType)
-
-		if methodType == vmMethodTypeIseq {
-
-			methodBodyOffset := 8
-			methodBody := r.rm.Ptr(methodDefinition + libpf.Address(methodBodyOffset))
-			log.Warnf("Method body %x", methodBody)
-
-			iseqConstantBodyOffset := 16
-			iseqBody = r.rm.Ptr(methodBody + libpf.Address(iseqConstantBodyOffset))
-
-			log.Warnf("iseq constant body %x", iseqBody)
+		classPath, iseqBody, err = r.processCmeFrame(frame)
+		if err != nil {
+			return err
 		}
 	} else {
 		// If the frame type from the eBPF Ruby unwinder is iseq type, we receive
@@ -850,7 +757,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		}
 
 		funcNamePtr := r.rm.Ptr(iseqBody +
-			libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.base_label))
+			libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.label))
 		functionName, err := r.getStringCached(funcNamePtr, r.readRubyString)
 		if err != nil {
 			return err
@@ -1105,6 +1012,7 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 	}
 	vms.iseq_location_struct.pathobj = 0
 	vms.iseq_location_struct.base_label = 8
+	vms.iseq_location_struct.label = 16
 
 	switch {
 	case version < rubyVersion(2, 6, 0):
@@ -1154,6 +1062,18 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 			} else {
 				vms.rb_ractor_struct.running_ec = 0x190
 			}
+
+			vms.rb_method_entry_struct.flags = 0
+			vms.rb_method_entry_struct.defined_class = 8
+			vms.rb_method_entry_struct.def = 16
+
+			vms.rclass_and_rb_classext_t.classext = 32
+			vms.rb_classext_struct.classpath = 120
+
+			vms.rb_method_definition_struct.method_type = 0
+			vms.rb_method_definition_struct.body = 8
+			vms.rb_method_iseq_struct.iseqptr = 0
+
 		} else {
 			if runtime.GOARCH == "amd64" {
 				vms.rb_ractor_struct.running_ec = 0x208
