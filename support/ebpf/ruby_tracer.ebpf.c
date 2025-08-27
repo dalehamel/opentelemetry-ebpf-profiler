@@ -68,9 +68,9 @@ static EBPF_INLINE u64 check_method_entry(u64 env_me_cref, int can_be_svar)
   if (env_me_cref == 0)
     return 0;
 
-  DEBUG_PRINT("ruby: checking %08x, %d", env_me_cref, can_be_svar);
+  DEBUG_PRINT("ruby: checking %llx, %d", env_me_cref, can_be_svar);
   if (bpf_probe_read_user(&rbasic_flags, sizeof(rbasic_flags), (void *)(env_me_cref))) {
-    DEBUG_PRINT("ruby: failed to read flags to check method entry %08x", env_me_cref);
+    DEBUG_PRINT("ruby: failed to read flags to check method entry %llx", env_me_cref);
     increment_metric(metricID_UnwindRubyErrReadCMEFlags);
     return 0;
   }
@@ -101,6 +101,7 @@ static EBPF_INLINE u64 check_method_entry(u64 env_me_cref, int can_be_svar)
 static EBPF_INLINE ErrorCode
 read_cme_frame(PerCPURecord *record, const RubyProcInfo *rubyinfo, void *stack_ptr, u64 pc)
 {
+  ErrorCode error;
   Trace *trace = &record->trace;
   u64 check_ep, ep = 0;
   u64 flags        = 0;
@@ -138,7 +139,7 @@ read_cme_frame(PerCPURecord *record, const RubyProcInfo *rubyinfo, void *stack_p
       increment_metric(metricID_UnwindRubyErrReadEp);
       return ERR_RUBY_FIND_CME;
     }
-    DEBUG_PRINT("%d %08x %08x %08x", i, flags, env_specval, env_me_cref);
+    //DEBUG_PRINT("%d %llx %llx %llx", i, flags, env_specval, env_me_cref);
     if ((flags & VM_ENV_FLAG_LOCAL) != 0) {
       method_entry = check_method_entry(env_me_cref, 0);
       if (method_entry != 0) {
@@ -161,7 +162,7 @@ read_cme_frame(PerCPURecord *record, const RubyProcInfo *rubyinfo, void *stack_p
       }
     } else {
       if (method_entry != 0) {
-        DEBUG_PRINT("ruby: %x is local me is %x, %x", env_specval, method_entry, env_me_cref);
+        DEBUG_PRINT("ruby: %llx is local me is %llx, %llx", env_specval, method_entry, env_me_cref);
       }
       break;
     }
@@ -174,7 +175,7 @@ read_cme_frame(PerCPURecord *record, const RubyProcInfo *rubyinfo, void *stack_p
   }
 
   method_entry = check_method_entry(env_me_cref, 1);
-  DEBUG_PRINT("ruby: method_entry found at %x", method_entry);
+  DEBUG_PRINT("ruby: method_entry found at %llx", method_entry);
 
   if (bpf_probe_read_user(&flags, sizeof(flags), (void *)(check_ep))) {
     DEBUG_PRINT("ruby: failed to get flags");
@@ -198,7 +199,8 @@ read_cme_frame(PerCPURecord *record, const RubyProcInfo *rubyinfo, void *stack_p
   return ERR_RUBY_FIND_CME;
 
 emit_cme:
-  ErrorCode error = push_ruby_cme(trace, env_me_cref, pc);
+
+  error = push_ruby_cme(trace, env_me_cref, pc);
   if (error) {
     DEBUG_PRINT("ruby: failed to push frame");
     return error;
