@@ -1,3 +1,4 @@
+// with all offsetts
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -46,6 +47,9 @@ const (
 
 //nolint:lll
 const (
+
+	//RUBY_T_CLASS    = 0x02,
+	rubyTClass = 0x2
 	// RUBY_T_STRING
 	// https://github.com/ruby/ruby/blob/c149708018135595b2c19c5f74baf9475674f394/include/ruby/internal/value_type.h#L117
 	rubyTString = 0x5
@@ -123,7 +127,7 @@ type rubyData struct {
 		// rb_iseq_location_struct
 		// https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L272
 		iseq_location_struct struct {
-			pathobj, base_label uint8
+			pathobj, base_label, label uint8
 		}
 
 		// succ_index_table_struct
@@ -166,6 +170,28 @@ type rubyData struct {
 		// https://github.com/ruby/ruby/blob/5ce0d2aa354eb996cb3ca9bb944f880ff6acfd57/ractor_core.h#L82
 		rb_ractor_struct struct {
 			running_ec uint16
+		}
+
+		// TODO add links to the structs
+		// https://github.com/ruby/ruby/blob/fd59ac6410d0cc93a8baaa42df77491abdb2e9b6/method.h#L63-L69
+		rb_method_entry_struct struct {
+			flags, defined_class, def uint8
+		}
+
+		rclass_and_rb_classext_t struct {
+			classext uint8
+		}
+
+		rb_classext_struct struct {
+			classpath uint8
+		}
+
+		rb_method_definition_struct struct {
+			method_type, body uint8
+		}
+
+		rb_method_iseq_struct struct {
+			iseqptr uint8
 		}
 	}
 }
@@ -378,7 +404,7 @@ func (r *rubyInstance) getStringCached(addr libpf.Address, reader StringReader) 
 		return libpf.NullString, err
 	}
 	if !util.IsValidString(str) {
-		log.Debugf("Extracted invalid string from Ruby at 0x%x '%v'", addr, libpf.SliceFrom(str))
+		log.Debugf("Extracted invalid string from Ruby at 0x%x, len=%d, bytes=%x", addr, len(str), []byte(str))
 		return libpf.NullString, fmt.Errorf("extracted invalid Ruby string from address 0x%x", addr)
 	}
 
@@ -629,8 +655,60 @@ func (r *rubyInstance) getRubyLineNo(iseqBody libpf.Address, pc uint64) (uint32,
 	return lineNo, nil
 }
 
+func (r *rubyInstance) processCmeFrame(frame *host.Frame) (libpf.String, libpf.Address, error) {
+	// Get the classpath, and figure out the iseq body offset from the definition
+	// so that we can get the name and line number as below
+
+	var classPath libpf.String
+	var iseqBody libpf.Address
+	var err error
+
+	vms := &r.r.vmStructs
+	cmeAddr := libpf.Address(frame.File)
+	log.Debugf("Got Ruby CME frame %X, %X", cmeAddr, frame.File)
+	//cmeFlags := r.rm.Ptr(cmeAddr + vms.rb_method_entry_struct.flags) // TODO Check imemo
+
+	classDefinition := r.rm.Ptr(cmeAddr + libpf.Address(vms.rb_method_entry_struct.defined_class))
+	log.Debugf("Class def %x", classDefinition)
+
+	classFlags := r.rm.Ptr(classDefinition)
+	classMask := classFlags & rubyTMask
+
+	if classMask == rubyTClass { // note we can also get iclass here (0x1c) but we don't seem to be able to read those
+		classpathAddr := classDefinition + libpf.Address(vms.rclass_and_rb_classext_t.classext+vms.rb_classext_struct.classpath)
+		classpathPtr := r.rm.Ptr(classpathAddr)
+		classPath, err = r.getStringCached(classpathPtr, r.readRubyString)
+		if err != nil {
+			log.Errorf("unable to read classpath string %x %v", classpathPtr, err)
+		} else {
+			log.Debugf("read classpath %s from cme", classPath)
+		}
+	}
+
+	vmMethodTypeIseq := uint32(0) // VM_METHOD_TYPE_ISEQ = 0
+	methodDefinition := r.rm.Ptr(cmeAddr + libpf.Address(vms.rb_method_entry_struct.def))
+	log.Debugf("Method def %x", methodDefinition)
+
+	// TODO verify size is 4
+	methodType := r.rm.Uint32(methodDefinition + libpf.Address(vms.rb_method_definition_struct.method_type))
+	log.Debugf("Method type %x", methodType)
+
+	if methodType == vmMethodTypeIseq {
+		methodBody := r.rm.Ptr(methodDefinition + libpf.Address(vms.rb_method_definition_struct.body))
+		log.Debugf("Method body %x", methodBody)
+
+		iseqBody = r.rm.Ptr(methodBody + libpf.Address(vms.rb_method_iseq_struct.iseqptr+vms.iseq_struct.body))
+	} else {
+		// This is actually a fatal error, we expect to be able to at least get the iseq body from the CME
+		log.Errorf("unexpected method type %08x, expected iseq type %08x", methodType, vmMethodTypeIseq)
+		return classPath, iseqBody, fmt.Errorf("unable to read iseq body from cme")
+	}
+
+	return classPath, iseqBody, nil
+}
+
 func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error {
-	if !frame.Type.IsInterpType(libpf.Ruby) {
+	if !frame.Type.IsInterpType(libpf.Ruby) && !frame.Type.IsInterpType(libpf.RubyCME) {
 		return interpreter.ErrMismatchInterpreterType
 	}
 	vms := &r.r.vmStructs
@@ -638,12 +716,23 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	sfCounter := successfailurecounter.New(&r.successCount, &r.failCount)
 	defer sfCounter.DefaultToFailure()
 
-	// From the eBPF Ruby unwinder we receive the address to the instruction sequence body in
-	// the Files field.
-	//
-	// rb_iseq_constant_body
-	// https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L311
-	iseqBody := libpf.Address(frame.File)
+	var iseqBody libpf.Address
+	var classPath libpf.String
+
+	if frame.Type.IsInterpType(libpf.RubyCME) {
+		var err error
+		classPath, iseqBody, err = r.processCmeFrame(frame)
+		if err != nil {
+			return err
+		}
+	} else {
+		// If the frame type from the eBPF Ruby unwinder is iseq type, we receive
+		// the address to the instruction sequence body in the Files field.
+		//
+		// rb_iseq_constant_body
+		// https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L311
+		iseqBody = libpf.Address(frame.File)
+	}
 	// The Ruby VM program counter that was extracted from the current call frame is embedded in
 	// the Linenos field.
 	pc := frame.Lineno
@@ -668,10 +757,15 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		}
 
 		funcNamePtr := r.rm.Ptr(iseqBody +
-			libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.base_label))
+			libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.label))
 		functionName, err := r.getStringCached(funcNamePtr, r.readRubyString)
 		if err != nil {
 			return err
+		}
+
+		if classPath != libpf.NullString {
+			// TODO we should properly use a `.` not `#` if it is a singleton class
+			functionName = libpf.Intern(fmt.Sprintf("%s#%s", classPath, functionName))
 		}
 
 		iseq = &rubyIseq{
@@ -784,10 +878,10 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 	// Reason for lowest supported version:
 	// - Ruby 2.5 is still commonly used at time of writing this code.
 	//   https://www.jetbrains.com/lp/devecosystem-2020/ruby/
-	// Reason for maximum supported version 3.2.x:
+	// Reason for maximum supported version 3.5.x:
 	// - this is currently the newest stable version
 
-	minVer, maxVer := rubyVersion(2, 5, 0), rubyVersion(3, 3, 0)
+	minVer, maxVer := rubyVersion(2, 5, 0), rubyVersion(3, 6, 0)
 	if version < minVer || version >= maxVer {
 		return nil, fmt.Errorf("unsupported Ruby %d.%d.%d (need >= %d.%d.%d and <= %d.%d.%d)",
 			(version>>16)&0xff, (version>>8)&0xff, version&0xff,
@@ -795,6 +889,9 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 			(maxVer>>16)&0xff, (maxVer>>8)&0xff, maxVer&0xff)
 	}
 
+	log.Debugf("Ruby %d.%d.%d detected", (version>>16)&0xff, (version>>8)&0xff, version&0xff)
+
+	var symMap *libpf.SymbolMap
 	// Before Ruby 2.5 the symbol ruby_current_thread was used for the current execution
 	// context but got replaced in [0] with ruby_current_execution_context_ptr.
 	// With [1] the Ruby internal execution model changed and the symbol
@@ -808,19 +905,43 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 	}
 	currentCtxPtr, err := ef.LookupSymbolAddress(currentCtxSymbol)
 	if err != nil {
-		return nil, fmt.Errorf("%v not found: %v", currentCtxSymbol, err)
+		// Ruby 3.3+: ruby_single_main_ractor is hidden, try to find it in the symbol table
+		log.Warnf("Ruby %d.%d.%d detected, looking for ruby_single_main_ractor in symbol table",
+			(version>>16)&0xff, (version>>8)&0xff, version&0xff)
+
+		symMap, err = ef.ReadSymbols()
+		if err != nil {
+			log.Debugf("Failed to read symbols: %v", err)
+			return nil, err
+		}
+		currentCtxPtr, err = symMap.LookupSymbolAddress(currentCtxSymbol)
+		if err != nil {
+			log.Debugf("Failed to lookup symbol in symbol table: %v", err)
+			return nil, fmt.Errorf("%v not found: %v", currentCtxSymbol, err)
+		}
 	}
 
 	// rb_vm_exec is used to execute the Ruby frames in the Ruby VM and is called within
 	// ruby_run_node  which is the main executor function since Ruby v1.9.0
 	// https://github.com/ruby/ruby/blob/587e6800086764a1b7c959976acef33e230dccc2/main.c#L47
+	var interpRanges []util.Range
 	symbolName := libpf.SymbolName("rb_vm_exec")
 	if version < rubyVersion(2, 6, 0) {
 		symbolName = libpf.SymbolName("ruby_exec_node")
 	}
-	interpRanges, err := info.GetSymbolAsRanges(symbolName)
-	if err != nil {
-		return nil, err
+	// if we already have a map of symbols, use it to lookup the symbol
+	if symMap != nil {
+		sym, err := symMap.LookupSymbol(symbolName)
+		if err != nil {
+			log.Warnf("Failed to lookup symbol %s in symbol table: %v", currentCtxSymbol, err)
+			return nil, err
+		}
+		interpRanges = info.SymbolAsRanges(sym)
+	} else {
+		interpRanges, err = info.GetSymbolAsRanges(symbolName)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	rid := &rubyData{
@@ -847,10 +968,14 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 		// With Ruby 2.6 the field bp was added to rb_control_frame_t
 		// https://github.com/ruby/ruby/commit/ed935aa5be0e5e6b8d53c3e7d76a9ce395dfa18b
 		vms.control_frame_struct.size_of_control_frame_struct = 56
-	default:
+	case version < rubyVersion(3, 3, 0):
 		// 3.1 adds new jit_return field at the end.
 		// https://github.com/ruby/ruby/commit/9d8cc01b758f9385bd4c806f3daff9719e07faa0
 		vms.control_frame_struct.size_of_control_frame_struct = 64
+	default:
+		// 3.3+ size changed after re-ordering fields
+		// https://github.com/ruby/ruby/commit/7740526b1ccf62a027984e35375bb30ccbc0a000
+		vms.control_frame_struct.size_of_control_frame_struct = 56
 	}
 	vms.iseq_struct.body = 16
 
@@ -869,14 +994,25 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 		vms.iseq_constant_body.insn_info_size = 136
 		vms.iseq_constant_body.succ_index_table = 144
 		vms.iseq_constant_body.size_of_iseq_constant_body = 312
-	default:
+	case version < rubyVersion(3, 3, 0):
 		vms.iseq_constant_body.insn_info_body = 112
 		vms.iseq_constant_body.insn_info_size = 128
 		vms.iseq_constant_body.succ_index_table = 136
 		vms.iseq_constant_body.size_of_iseq_constant_body = 320
+	case version >= rubyVersion(3, 4, 0) && version < rubyVersion(3, 5, 0):
+		vms.iseq_constant_body.insn_info_body = 112
+		vms.iseq_constant_body.insn_info_size = 128
+		vms.iseq_constant_body.succ_index_table = 136
+		vms.iseq_constant_body.size_of_iseq_constant_body = 352
+	default: // 3.3.x and 3.5.x have the same values
+		vms.iseq_constant_body.insn_info_body = 112
+		vms.iseq_constant_body.insn_info_size = 128
+		vms.iseq_constant_body.succ_index_table = 136
+		vms.iseq_constant_body.size_of_iseq_constant_body = 344
 	}
 	vms.iseq_location_struct.pathobj = 0
 	vms.iseq_location_struct.base_label = 8
+	vms.iseq_location_struct.label = 16
 
 	switch {
 	case version < rubyVersion(2, 6, 0):
@@ -920,10 +1056,30 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 	vms.size_of_value = 8
 
 	if version >= rubyVersion(3, 0, 0) {
-		if runtime.GOARCH == "amd64" {
-			vms.rb_ractor_struct.running_ec = 0x208
+		if version >= rubyVersion(3, 3, 0) {
+			if runtime.GOARCH == "amd64" {
+				vms.rb_ractor_struct.running_ec = 0x180
+			} else {
+				vms.rb_ractor_struct.running_ec = 0x190
+			}
+
+			vms.rb_method_entry_struct.flags = 0
+			vms.rb_method_entry_struct.defined_class = 8
+			vms.rb_method_entry_struct.def = 16
+
+			vms.rclass_and_rb_classext_t.classext = 32
+			vms.rb_classext_struct.classpath = 120
+
+			vms.rb_method_definition_struct.method_type = 0
+			vms.rb_method_definition_struct.body = 8
+			vms.rb_method_iseq_struct.iseqptr = 0
+
 		} else {
-			vms.rb_ractor_struct.running_ec = 0x218
+			if runtime.GOARCH == "amd64" {
+				vms.rb_ractor_struct.running_ec = 0x208
+			} else {
+				vms.rb_ractor_struct.running_ec = 0x218
+			}
 		}
 	}
 
