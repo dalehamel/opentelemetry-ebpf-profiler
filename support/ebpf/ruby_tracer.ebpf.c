@@ -16,10 +16,10 @@ bpf_map_def SEC("maps") ruby_procs = {
 // The number of Ruby frames to unwind per frame-unwinding eBPF program. If
 // we start running out of instructions in the walk_ruby_stack program, one
 // option is to adjust this number downwards.
-#define FRAMES_PER_WALK_RUBY_STACK 27
+#define FRAMES_PER_WALK_RUBY_STACK 19
 
 // The maximum number of frames to check for a callable method entry
-#define CME_MAX_CHECK_FRAMES 10
+#define CME_MAX_CHECK_FRAMES 5
 
 // Ruby VM frame flags are internal indicators for the VM interpreter to
 // treat frames in a dedicated way.
@@ -59,16 +59,41 @@ static EBPF_INLINE ErrorCode push_ruby_cme(Trace *trace, u64 file, u64 line)
 }
 
 // Check for ruby method entry
-static EBPF_INLINE u64 check_method_entry(u64 env_me_cref, int can_be_svar)
+static EBPF_INLINE u64 check_method_entry_no_svar(u64 env_me_cref)
 {
   // should be at offset 0 on the struct, and size of VALUE, so u64 should fit it
   u64 rbasic_flags = 0;
-  u64 env_cme_cref = 0;
 
   if (env_me_cref == 0)
     return 0;
 
-  DEBUG_PRINT("ruby: checking %llx, %d", env_me_cref, can_be_svar);
+  DEBUG_PRINT("ruby: checking %llx", env_me_cref);
+  if (bpf_probe_read_user(&rbasic_flags, sizeof(rbasic_flags), (void *)(env_me_cref))) {
+    DEBUG_PRINT("ruby: failed to read flags to check method entry %llx", env_me_cref);
+    increment_metric(metricID_UnwindRubyErrReadCMEFlags);
+    return 0;
+  }
+
+  u64 imemo_type = (rbasic_flags >> RUBY_FL_USHIFT) & IMEMO_MASK;
+
+  switch (imemo_type) {
+  case IMEMO_MENT: DEBUG_PRINT("ruby: imemo type is method entry"); return env_me_cref;
+  case IMEMO_CREF: return 0;
+  }
+  return 0;
+}
+// Check for ruby method entry
+static EBPF_INLINE u64 check_method_entry_svar_allowed(u64 env_me_cref)
+{
+  // should be at offset 0 on the struct, and size of VALUE, so u64 should fit it
+  u64 rbasic_flags = 0;
+  u64 env_cme_cref = 0;
+  u64 cref_or_me = 0;
+
+  if (env_me_cref == 0)
+    return 0;
+
+  DEBUG_PRINT("ruby: checking %llx", env_me_cref);
   if (bpf_probe_read_user(&rbasic_flags, sizeof(rbasic_flags), (void *)(env_me_cref))) {
     DEBUG_PRINT("ruby: failed to read flags to check method entry %llx", env_me_cref);
     increment_metric(metricID_UnwindRubyErrReadCMEFlags);
@@ -81,19 +106,14 @@ static EBPF_INLINE u64 check_method_entry(u64 env_me_cref, int can_be_svar)
   case IMEMO_MENT: DEBUG_PRINT("ruby: imemo type is method entry"); return env_me_cref;
   case IMEMO_CREF: return 0;
   case IMEMO_SVAR:
-    if (can_be_svar) {
+    if (bpf_probe_read_user(
+          &cref_or_me, sizeof(cref_or_me), (void *)(env_cme_cref + VM_SVAR_CREF_OFFSET))) {
+      DEBUG_PRINT("ruby: failed to read svar.cref_or_me");
+      increment_metric(metricID_UnwindRubyErrReadMethodEntryFromSvar);
 
-      u64 cref_or_me = 0; // should be at offset 8 on the struct, (size of value)
-
-      if (bpf_probe_read_user(
-            &cref_or_me, sizeof(cref_or_me), (void *)(env_cme_cref + VM_SVAR_CREF_OFFSET))) {
-        DEBUG_PRINT("ruby: failed to read svar.cref_or_me");
-        increment_metric(metricID_UnwindRubyErrReadMethodEntryFromSvar);
-
-        return 0;
-      }
-      return check_method_entry(cref_or_me, 0);
+      return 0;
     }
+    return check_method_entry_no_svar(cref_or_me);
   }
   return 0;
 }
@@ -141,7 +161,7 @@ read_cme_frame(PerCPURecord *record, const RubyProcInfo *rubyinfo, void *stack_p
     }
     //DEBUG_PRINT("%d %llx %llx %llx", i, flags, env_specval, env_me_cref);
     if ((flags & VM_ENV_FLAG_LOCAL) != 0) {
-      method_entry = check_method_entry(env_me_cref, 0);
+      method_entry = check_method_entry_no_svar(env_me_cref);
       if (method_entry != 0) {
         goto emit_cme;
       }
@@ -174,7 +194,7 @@ read_cme_frame(PerCPURecord *record, const RubyProcInfo *rubyinfo, void *stack_p
     }
   }
 
-  method_entry = check_method_entry(env_me_cref, 1);
+  method_entry = check_method_entry_svar_allowed(env_me_cref);
   DEBUG_PRINT("ruby: method_entry found at %llx", method_entry);
 
   if (bpf_probe_read_user(&flags, sizeof(flags), (void *)(check_ep))) {
