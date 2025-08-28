@@ -677,11 +677,14 @@ func (r *rubyInstance) processCmeFrame(frame *host.Frame) (libpf.String, libpf.A
 	if classMask == rubyTClass { // note we can also get iclass here (0x1c) but we don't seem to be able to read those
 		classpathAddr := classDefinition + libpf.Address(vms.rclass_and_rb_classext_t.classext+vms.rb_classext_struct.classpath)
 		classpathPtr := r.rm.Ptr(classpathAddr)
-		classPath, err = r.getStringCached(classpathPtr, r.readRubyString)
-		if err != nil {
-			log.Errorf("unable to read classpath string %x %v", classpathPtr, err)
-		} else {
-			log.Debugf("read classpath %s from cme", classPath)
+
+		if classpathPtr != 0 {
+			classPath, err = r.getStringCached(classpathPtr, r.readRubyString)
+			if err != nil {
+				log.Errorf("unable to read classpath string %x %v", classpathPtr, err)
+			} else {
+				log.Debugf("read classpath %s from cme", classPath)
+			}
 		}
 	}
 
@@ -701,6 +704,13 @@ func (r *rubyInstance) processCmeFrame(frame *host.Frame) (libpf.String, libpf.A
 	} else {
 		// This is actually a fatal error, we expect to be able to at least get the iseq body from the CME
 		log.Errorf("unexpected method type %08x, expected iseq type %08x", methodType, vmMethodTypeIseq)
+
+		methodBody := r.rm.Ptr(methodDefinition + libpf.Address(vms.rb_method_definition_struct.body))
+		log.Errorf("Method body %x", methodBody)
+
+		iseqBody = r.rm.Ptr(methodBody + libpf.Address(vms.rb_method_iseq_struct.iseqptr+vms.iseq_struct.body))
+		log.Errorf("iseq body %x", iseqBody)
+
 		return classPath, iseqBody, fmt.Errorf("unable to read iseq body from cme")
 	}
 
