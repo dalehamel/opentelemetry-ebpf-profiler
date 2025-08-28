@@ -696,22 +696,21 @@ func (r *rubyInstance) processCmeFrame(frame *host.Frame) (libpf.String, libpf.A
 	methodType := r.rm.Uint32(methodDefinition + libpf.Address(vms.rb_method_definition_struct.method_type))
 	log.Debugf("Method type %x", methodType)
 
-	if methodType == vmMethodTypeIseq {
-		methodBody := r.rm.Ptr(methodDefinition + libpf.Address(vms.rb_method_definition_struct.body))
-		log.Debugf("Method body %x", methodBody)
+	if methodType != vmMethodTypeIseq {
+		log.Warnf("Unexpected method type %d", methodType)
+	}
 
-		iseqBody = r.rm.Ptr(methodBody + libpf.Address(vms.rb_method_iseq_struct.iseqptr+vms.iseq_struct.body))
-	} else {
-		// This is actually a fatal error, we expect to be able to at least get the iseq body from the CME
-		log.Errorf("unexpected method type %08x, expected iseq type %08x", methodType, vmMethodTypeIseq)
+	methodBody := r.rm.Ptr(methodDefinition + libpf.Address(vms.rb_method_definition_struct.body))
+	if methodBody == 0 {
+		log.Errorf("method body was empty")
+		return classPath, iseqBody, fmt.Errorf("unable to read method body")
+	}
 
-		methodBody := r.rm.Ptr(methodDefinition + libpf.Address(vms.rb_method_definition_struct.body))
-		log.Errorf("Method body %x", methodBody)
+	iseqBody = r.rm.Ptr(methodBody + libpf.Address(vms.rb_method_iseq_struct.iseqptr+vms.iseq_struct.body))
 
-		iseqBody = r.rm.Ptr(methodBody + libpf.Address(vms.rb_method_iseq_struct.iseqptr+vms.iseq_struct.body))
-		log.Errorf("iseq body %x", iseqBody)
-
-		return classPath, iseqBody, fmt.Errorf("unable to read iseq body from cme")
+	if iseqBody == 0 {
+		log.Errorf("iseq body was empty")
+		return classPath, iseqBody, fmt.Errorf("unable to read iseq body")
 	}
 
 	return classPath, iseqBody, nil
