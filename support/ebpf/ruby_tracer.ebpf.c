@@ -88,7 +88,7 @@ static EBPF_INLINE u64 check_method_entry_svar_allowed(u64 env_me_cref)
   // should be at offset 0 on the struct, and size of VALUE, so u64 should fit it
   u64 rbasic_flags = 0;
   u64 env_cme_cref = 0;
-  u64 cref_or_me = 0;
+  u64 cref_or_me   = 0;
 
   if (env_me_cref == 0)
     return 0;
@@ -159,7 +159,7 @@ read_cme_frame(PerCPURecord *record, const RubyProcInfo *rubyinfo, void *stack_p
       increment_metric(metricID_UnwindRubyErrReadEp);
       return ERR_RUBY_FIND_CME;
     }
-    //DEBUG_PRINT("%d %llx %llx %llx", i, flags, env_specval, env_me_cref);
+    // DEBUG_PRINT("%d %llx %llx %llx", i, flags, env_specval, env_me_cref);
     if ((flags & VM_ENV_FLAG_LOCAL) != 0) {
       method_entry = check_method_entry_no_svar(env_me_cref);
       if (method_entry != 0) {
