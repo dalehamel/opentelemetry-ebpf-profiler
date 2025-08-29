@@ -89,6 +89,8 @@ type rubyData struct {
 	// eBPF program to build ruby backtraces.
 	currentCtxPtr libpf.Address
 
+	currentEcTlsOffset uint64
+
 	// version of the currently used Ruby interpreter.
 	// major*0x10000 + minor*0x100 + release (e.g. 3.0.1 -> 0x30001)
 	version uint32
@@ -180,7 +182,8 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 	cdata := support.RubyProcInfo{
 		Version: r.version,
 
-		Current_ctx_ptr: uint64(r.currentCtxPtr + bias),
+		Current_ctx_ptr:       uint64(r.currentCtxPtr + bias),
+		Current_ec_tls_offset: r.currentEcTlsOffset,
 
 		Vm_stack:      r.vmStructs.execution_context_struct.vm_stack,
 		Vm_stack_size: r.vmStructs.execution_context_struct.vm_stack_size,
@@ -799,7 +802,6 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 
 	log.Debugf("Ruby %d.%d.%d detected", (version>>16)&0xff, (version>>8)&0xff, version&0xff)
 
-	var symMap *libpf.SymbolMap
 	// Before Ruby 2.5 the symbol ruby_current_thread was used for the current execution
 	// context but got replaced in [0] with ruby_current_execution_context_ptr.
 	// With [1] the Ruby internal execution model changed and the symbol
@@ -811,51 +813,48 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 	if version < rubyVersion(3, 0, 0) {
 		currentCtxSymbol = "ruby_current_execution_context_ptr"
 	}
-	currentCtxPtr, err := ef.LookupSymbolAddress(currentCtxSymbol)
-	if err != nil {
-		// Ruby 3.3+: ruby_single_main_ractor is hidden, try to find it in the symbol table
-		log.Warnf("Ruby %d.%d.%d detected, looking for ruby_single_main_ractor in symbol table",
-			(version>>16)&0xff, (version>>8)&0xff, version&0xff)
 
-		symMap, err = ef.ReadSymbols()
-		if err != nil {
-			log.Debugf("Failed to read symbols: %v", err)
-			return nil, err
-		}
-		currentCtxPtr, err = symMap.LookupSymbolAddress(currentCtxSymbol)
-		if err != nil {
-			log.Debugf("Failed to lookup symbol in symbol table: %v", err)
-			return nil, fmt.Errorf("%v not found: %v", currentCtxSymbol, err)
-		}
-	}
+	var currentEcTlsOffset libpf.SymbolValue
+	var interpRanges []util.Range
 
 	// rb_vm_exec is used to execute the Ruby frames in the Ruby VM and is called within
 	// ruby_run_node  which is the main executor function since Ruby v1.9.0
 	// https://github.com/ruby/ruby/blob/587e6800086764a1b7c959976acef33e230dccc2/main.c#L47
-	var interpRanges []util.Range
 	symbolName := libpf.SymbolName("rb_vm_exec")
 	if version < rubyVersion(2, 6, 0) {
 		symbolName = libpf.SymbolName("ruby_exec_node")
 	}
-	// if we already have a map of symbols, use it to lookup the symbol
-	if symMap != nil {
-		var sym *libpf.Symbol
-		sym, err = symMap.LookupSymbol(symbolName)
-		if err != nil {
-			log.Warnf("Failed to lookup symbol %s in symbol table: %v", currentCtxSymbol, err)
-			return nil, err
+
+	currentCtxPtr, err := ef.LookupSymbolAddress(currentCtxSymbol)
+	log.Infof("Ruby %d.%d.%d detected, looking for ruby_single_main_ractor in symbol table",
+		(version>>16)&0xff, (version>>8)&0xff, version&0xff)
+
+	var currentEcSymbol *libpf.Symbol
+	currentEcSymbolName := libpf.SymbolName("ruby_current_ec")
+
+	err = ef.VisitUntilSymbol(func(s libpf.Symbol) bool {
+		if s.Name == currentEcSymbolName {
+			currentEcSymbol = &s
 		}
-		interpRanges = info.SymbolAsRanges(sym)
-	} else {
-		interpRanges, err = info.GetSymbolAsRanges(symbolName)
-		if err != nil {
-			return nil, err
+		if s.Name == symbolName {
+			interpRanges = info.SymbolAsRanges(&s)
 		}
+		if len(interpRanges) > 0 && currentEcSymbol != nil {
+			return false
+		}
+		return true
+	})
+
+	if currentEcSymbol != nil {
+		currentEcTlsOffset = currentEcSymbol.Address
 	}
 
+	log.Debugf("Discovered EC %x, interp ranges: %v", currentEcTlsOffset, interpRanges)
+
 	rid := &rubyData{
-		version:       version,
-		currentCtxPtr: libpf.Address(currentCtxPtr),
+		version:            version,
+		currentCtxPtr:      libpf.Address(currentCtxPtr),
+		currentEcTlsOffset: uint64(currentEcTlsOffset),
 	}
 
 	vms := &rid.vmStructs
