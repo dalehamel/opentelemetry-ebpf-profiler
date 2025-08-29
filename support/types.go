@@ -270,6 +270,7 @@ type PyProcInfo struct {
 }
 type RubyProcInfo struct {
 	Version                      uint32
+	Current_ec_tls_offset        uint64
 	Current_ctx_ptr              uint64
 	Vm_stack                     uint8
 	Vm_stack_size                uint8
@@ -316,7 +317,7 @@ const (
 	sizeof_ApmIntProcInfo = 0x8
 	sizeof_DotnetProcInfo = 0x4
 	sizeof_PHPProcInfo    = 0x18
-	sizeof_RubyProcInfo   = 0x20
+	sizeof_RubyProcInfo   = 0x28
 )
 
 const (
