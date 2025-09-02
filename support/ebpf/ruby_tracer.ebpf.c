@@ -241,8 +241,7 @@ static EBPF_INLINE u64 addr_for_tls_symbol(u64 symbol, bool dtv, u32 module_id)
     u64 dtv_addr;
 
     if ((err = bpf_probe_read_user(&dtv_addr, sizeof(void *), (void *)(tsd_base)))) {
-      // increment_metric(metricID_UnwindNativeCustomLabelsErrReadData);
-      DEBUG_PRINT("Failed to read TLS DTV addr: %d", err);
+      DEBUG_PRINT("ruby: failed to read TLS DTV addr: %d", err);
       return 0;
     }
 
@@ -255,9 +254,8 @@ static EBPF_INLINE u64 addr_for_tls_symbol(u64 symbol, bool dtv, u32 module_id)
     u64 dtv_offset = (module_id + 1) * sizeof(void *);
 
     if ((err = bpf_probe_read_user(&addr, sizeof(void *), (void *)(dtv_addr + dtv_offset)))) {
-      // increment_metric(metricID_UnwindNativeCustomLabelsErrReadData);
       DEBUG_PRINT(
-        "Failed to read TLS block addr for module %d at DTV offset %llu: %d",
+        "ruby: failed to read TLS block addr for module %d at DTV offset %llu: %d",
         module_id,
         dtv_offset,
         err);
