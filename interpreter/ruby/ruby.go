@@ -329,21 +329,36 @@ func (r *rubyInstance) readPathObjRealPath(addr libpf.Address) (string, error) {
 	flags := r.rm.Ptr(addr)
 	switch flags & rubyTMask {
 	case rubyTString:
-		// nothing to do
+		return r.readRubyString(addr)
 	case rubyTArray:
-		var err error
-		addr, err = r.readRubyArrayDataPtr(addr)
-		if err != nil {
-			return "", err
+		vms := &r.r.vmStructs
+		arrData, e := r.readRubyArrayDataPtr(addr)
+		if e != nil {
+			return "", e
+		}
+		relVal := r.rm.Ptr(arrData + 0*libpf.Address(vms.size_of_value))
+		absVal := r.rm.Ptr(arrData + 1*libpf.Address(vms.size_of_value))
+		var relTag, absTag uint64
+		if relVal != 0 {
+			relTag = uint64(r.rm.Ptr(relVal)) & uint64(rubyTMask)
+		}
+		if absVal != 0 {
+			absTag = uint64(r.rm.Ptr(absVal)) & uint64(rubyTMask)
 		}
 
-		addr += pathObjRealPathIdx * libpf.Address(r.r.vmStructs.size_of_value)
-		addr = r.rm.Ptr(addr) // deref VALUE -> RString object
+		var candidate libpf.Address
+		if absVal != 0 && absTag == uint64(rubyTString) {
+			candidate = absVal
+		} else if relVal != 0 && relTag == uint64(rubyTString) {
+			candidate = relVal
+		} else {
+			return "", fmt.Errorf("pathobj array has no string entries: relTag=0x%x absTag=0x%x", relTag, absTag)
+		}
+
+		return r.readRubyString(candidate)
 	default:
 		return "", fmt.Errorf("unexpected pathobj type tag: 0x%X", flags&rubyTMask)
 	}
-
-	return r.readRubyString(addr)
 }
 
 // readRubyString extracts a Ruby string from the given addr.
