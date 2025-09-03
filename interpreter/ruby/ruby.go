@@ -1,3 +1,4 @@
+// with all offsetts
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -87,6 +88,8 @@ type rubyData struct {
 	// currentCtxPtr is the `ruby_current_execution_context_ptr` symbol value which is needed by the
 	// eBPF program to build ruby backtraces.
 	currentCtxPtr libpf.Address
+
+	currentEcTlsOffset uint64
 
 	// version of the currently used Ruby interpreter.
 	// major*0x10000 + minor*0x100 + release (e.g. 3.0.1 -> 0x30001)
@@ -179,7 +182,8 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 	cdata := support.RubyProcInfo{
 		Version: r.version,
 
-		Current_ctx_ptr: uint64(r.currentCtxPtr + bias),
+		Current_ctx_ptr:       uint64(r.currentCtxPtr + bias),
+		Current_ec_tls_offset: r.currentEcTlsOffset,
 
 		Vm_stack:      r.vmStructs.execution_context_struct.vm_stack,
 		Vm_stack_size: r.vmStructs.execution_context_struct.vm_stack_size,
@@ -325,21 +329,36 @@ func (r *rubyInstance) readPathObjRealPath(addr libpf.Address) (string, error) {
 	flags := r.rm.Ptr(addr)
 	switch flags & rubyTMask {
 	case rubyTString:
-		// nothing to do
+		return r.readRubyString(addr)
 	case rubyTArray:
-		var err error
-		addr, err = r.readRubyArrayDataPtr(addr)
-		if err != nil {
-			return "", err
+		vms := &r.r.vmStructs
+		arrData, e := r.readRubyArrayDataPtr(addr)
+		if e != nil {
+			return "", e
+		}
+		relVal := r.rm.Ptr(arrData + 0*libpf.Address(vms.size_of_value))
+		absVal := r.rm.Ptr(arrData + 1*libpf.Address(vms.size_of_value))
+		var relTag, absTag uint64
+		if relVal != 0 {
+			relTag = uint64(r.rm.Ptr(relVal)) & uint64(rubyTMask)
+		}
+		if absVal != 0 {
+			absTag = uint64(r.rm.Ptr(absVal)) & uint64(rubyTMask)
 		}
 
-		addr += pathObjRealPathIdx * libpf.Address(r.r.vmStructs.size_of_value)
-		addr = r.rm.Ptr(addr) // deref VALUE -> RString object
+		var candidate libpf.Address
+		if absVal != 0 && absTag == uint64(rubyTString) {
+			candidate = absVal
+		} else if relVal != 0 && relTag == uint64(rubyTString) {
+			candidate = relVal
+		} else {
+			return "", fmt.Errorf("pathobj array has no string entries: relTag=0x%x absTag=0x%x", relTag, absTag)
+		}
+
+		return r.readRubyString(candidate)
 	default:
 		return "", fmt.Errorf("unexpected pathobj type tag: 0x%X", flags&rubyTMask)
 	}
-
-	return r.readRubyString(addr)
 }
 
 // readRubyString extracts a Ruby string from the given addr.
@@ -378,7 +397,8 @@ func (r *rubyInstance) getStringCached(addr libpf.Address, reader StringReader) 
 		return libpf.NullString, err
 	}
 	if !util.IsValidString(str) {
-		log.Debugf("Extracted invalid string from Ruby at 0x%x '%v'", addr, libpf.SliceFrom(str))
+		log.Debugf("Extracted invalid string from Ruby at 0x%x, len=%d, bytes=%x",
+			addr, len(str), []byte(str))
 		return libpf.NullString, fmt.Errorf("extracted invalid Ruby string from address 0x%x", addr)
 	}
 
@@ -784,16 +804,18 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 	// Reason for lowest supported version:
 	// - Ruby 2.5 is still commonly used at time of writing this code.
 	//   https://www.jetbrains.com/lp/devecosystem-2020/ruby/
-	// Reason for maximum supported version 3.2.x:
+	// Reason for maximum supported version 3.5.x:
 	// - this is currently the newest stable version
 
-	minVer, maxVer := rubyVersion(2, 5, 0), rubyVersion(3, 3, 0)
+	minVer, maxVer := rubyVersion(2, 5, 0), rubyVersion(3, 6, 0)
 	if version < minVer || version >= maxVer {
 		return nil, fmt.Errorf("unsupported Ruby %d.%d.%d (need >= %d.%d.%d and <= %d.%d.%d)",
 			(version>>16)&0xff, (version>>8)&0xff, version&0xff,
 			(minVer>>16)&0xff, (minVer>>8)&0xff, minVer&0xff,
 			(maxVer>>16)&0xff, (maxVer>>8)&0xff, maxVer&0xff)
 	}
+
+	log.Debugf("Ruby %d.%d.%d detected", (version>>16)&0xff, (version>>8)&0xff, version&0xff)
 
 	// Before Ruby 2.5 the symbol ruby_current_thread was used for the current execution
 	// context but got replaced in [0] with ruby_current_execution_context_ptr.
@@ -806,10 +828,9 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 	if version < rubyVersion(3, 0, 0) {
 		currentCtxSymbol = "ruby_current_execution_context_ptr"
 	}
-	currentCtxPtr, err := ef.LookupSymbolAddress(currentCtxSymbol)
-	if err != nil {
-		return nil, fmt.Errorf("%v not found: %v", currentCtxSymbol, err)
-	}
+
+	var currentEcTlsOffset libpf.SymbolValue
+	var interpRanges []util.Range
 
 	// rb_vm_exec is used to execute the Ruby frames in the Ruby VM and is called within
 	// ruby_run_node  which is the main executor function since Ruby v1.9.0
@@ -818,14 +839,37 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 	if version < rubyVersion(2, 6, 0) {
 		symbolName = libpf.SymbolName("ruby_exec_node")
 	}
-	interpRanges, err := info.GetSymbolAsRanges(symbolName)
-	if err != nil {
-		return nil, err
+
+	currentCtxPtr, err := ef.LookupSymbolAddress(currentCtxSymbol)
+	log.Infof("Ruby %d.%d.%d detected, looking for ruby_single_main_ractor in symbol table",
+		(version>>16)&0xff, (version>>8)&0xff, version&0xff)
+
+	var currentEcSymbol *libpf.Symbol
+	currentEcSymbolName := libpf.SymbolName("ruby_current_ec")
+
+	err = ef.VisitUntilSymbol(func(s libpf.Symbol) bool {
+		if s.Name == currentEcSymbolName {
+			currentEcSymbol = &s
+		}
+		if s.Name == symbolName {
+			interpRanges = info.SymbolAsRanges(&s)
+		}
+		if len(interpRanges) > 0 && currentEcSymbol != nil {
+			return false
+		}
+		return true
+	})
+
+	if currentEcSymbol != nil {
+		currentEcTlsOffset = currentEcSymbol.Address
 	}
 
+	log.Debugf("Discovered EC %x, interp ranges: %v", currentEcTlsOffset, interpRanges)
+
 	rid := &rubyData{
-		version:       version,
-		currentCtxPtr: libpf.Address(currentCtxPtr),
+		version:            version,
+		currentCtxPtr:      libpf.Address(currentCtxPtr),
+		currentEcTlsOffset: uint64(currentEcTlsOffset),
 	}
 
 	vms := &rid.vmStructs
@@ -847,10 +891,14 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 		// With Ruby 2.6 the field bp was added to rb_control_frame_t
 		// https://github.com/ruby/ruby/commit/ed935aa5be0e5e6b8d53c3e7d76a9ce395dfa18b
 		vms.control_frame_struct.size_of_control_frame_struct = 56
-	default:
+	case version < rubyVersion(3, 3, 0):
 		// 3.1 adds new jit_return field at the end.
 		// https://github.com/ruby/ruby/commit/9d8cc01b758f9385bd4c806f3daff9719e07faa0
 		vms.control_frame_struct.size_of_control_frame_struct = 64
+	default:
+		// 3.3+ bp field was removed
+		// https://github.com/ruby/ruby/commit/f302e725e10ae05e613e2c24cae0741f65f2db91
+		vms.control_frame_struct.size_of_control_frame_struct = 56
 	}
 	vms.iseq_struct.body = 16
 
@@ -869,11 +917,21 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 		vms.iseq_constant_body.insn_info_size = 136
 		vms.iseq_constant_body.succ_index_table = 144
 		vms.iseq_constant_body.size_of_iseq_constant_body = 312
-	default:
+	case version < rubyVersion(3, 3, 0):
 		vms.iseq_constant_body.insn_info_body = 112
 		vms.iseq_constant_body.insn_info_size = 128
 		vms.iseq_constant_body.succ_index_table = 136
 		vms.iseq_constant_body.size_of_iseq_constant_body = 320
+	case version >= rubyVersion(3, 4, 0) && version < rubyVersion(3, 5, 0):
+		vms.iseq_constant_body.insn_info_body = 112
+		vms.iseq_constant_body.insn_info_size = 128
+		vms.iseq_constant_body.succ_index_table = 136
+		vms.iseq_constant_body.size_of_iseq_constant_body = 352
+	default: // 3.3.x and 3.5.x have the same values
+		vms.iseq_constant_body.insn_info_body = 112
+		vms.iseq_constant_body.insn_info_size = 128
+		vms.iseq_constant_body.succ_index_table = 136
+		vms.iseq_constant_body.size_of_iseq_constant_body = 344
 	}
 	vms.iseq_location_struct.pathobj = 0
 	vms.iseq_location_struct.base_label = 8
@@ -920,10 +978,18 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 	vms.size_of_value = 8
 
 	if version >= rubyVersion(3, 0, 0) {
-		if runtime.GOARCH == "amd64" {
-			vms.rb_ractor_struct.running_ec = 0x208
+		if version >= rubyVersion(3, 3, 0) {
+			if runtime.GOARCH == "amd64" {
+				vms.rb_ractor_struct.running_ec = 0x180
+			} else {
+				vms.rb_ractor_struct.running_ec = 0x190
+			}
 		} else {
-			vms.rb_ractor_struct.running_ec = 0x218
+			if runtime.GOARCH == "amd64" {
+				vms.rb_ractor_struct.running_ec = 0x208
+			} else {
+				vms.rb_ractor_struct.running_ec = 0x218
+			}
 		}
 	}
 
