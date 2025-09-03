@@ -230,20 +230,37 @@ static EBPF_INLINE u64 addr_for_tls_symbol(u64 symbol, bool dtv, u32 module_id)
 {
   u64 tsd_base;
   if (tsd_get_base((void **)&tsd_base) != 0) {
-    // increment_metric(metricID_UnwindNativeCustomLabelsErrReadTsdBase);
-    DEBUG_PRINT("cl: failed to get TSD base for native custom labels");
+    DEBUG_PRINT("cl: failed to get TSD base for TLS symbol lookup");
     return 0;
   }
 
   int err;
   u64 addr;
+
   if (dtv) {
     u64 dtv_addr;
+#if defined(__x86_64__)
+    // On x86-64, the FS register points to the TCB
+    // The DTV is typically at offset 0 or 8 from the TCB
+    // You may need to adjust this offset based on your glibc version
 
+    // Try offset 8 first (common in modern glibc)
+    // https://sourceware.org/git/?p=glibc.git;a=blob;f=sysdeps/x86_64/nptl/tls.h;h=683f8bfdfcad45734c4cc1aeea844582a5528640;hb=HEAD#l46
+    if ((err = bpf_probe_read_user(&dtv_addr, sizeof(void *), (void *)(tsd_base + 8)))) {
+      // If that fails, try offset 0
+      if ((err = bpf_probe_read_user(&dtv_addr, sizeof(void *), (void *)tsd_base))) {
+        DEBUG_PRINT("ruby: failed to read TLS DTV addr: %d", err);
+        return 0;
+      }
+    }
+#elif defined(__aarch64__)
+    // on aarch64, it is just at tsdbase
+    // https://sourceware.org/git/?p=glibc.git;a=blob;f=sysdeps/aarch64/nptl/tls.h;h=ede7c0ddc46fb82fa92d7abac2d5b208eeafb7d4;hb=HEAD#l45
     if ((err = bpf_probe_read_user(&dtv_addr, sizeof(void *), (void *)(tsd_base)))) {
       DEBUG_PRINT("ruby: failed to read TLS DTV addr: %d", err);
       return 0;
     }
+#endif
 
     // DTV layout is the same across architectures:
     // DTV[0] = generation counter
@@ -252,7 +269,6 @@ static EBPF_INLINE u64 addr_for_tls_symbol(u64 symbol, bool dtv, u32 module_id)
     // DTV[3] = module 2's TLS block
     // ...
     u64 dtv_offset = (module_id + 1) * sizeof(void *);
-
     if ((err = bpf_probe_read_user(&addr, sizeof(void *), (void *)(dtv_addr + dtv_offset)))) {
       DEBUG_PRINT(
         "ruby: failed to read TLS block addr for module %d at DTV offset %llu: %d",
@@ -267,6 +283,7 @@ static EBPF_INLINE u64 addr_for_tls_symbol(u64 symbol, bool dtv, u32 module_id)
   }
   return addr;
 }
+
 // unwind_ruby is the tail call destination for PROG_UNWIND_RUBY.
 static EBPF_INLINE int unwind_ruby(struct pt_regs *ctx)
 {
