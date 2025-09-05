@@ -88,6 +88,12 @@ typedef enum ErrorCode {
   // Ruby: Unable to read the instruction sequence size
   ERR_RUBY_READ_ISEQ_SIZE = 3007,
 
+  // Ruby: Unable to locate a local frame to find CME
+  ERR_RUBY_FIND_LOCAL_FRAME = 3008,
+
+  // Ruby: Unable to locate a valid CME
+  ERR_RUBY_FIND_CME = 3009,
+
   // Native: Unable to find the code section in the stack delta page info map
   ERR_NATIVE_LOOKUP_TEXT_SECTION = 4000,
 
@@ -121,8 +127,7 @@ typedef enum ErrorCode {
   // Native: Unable to read the IRQ stack link
   ERR_NATIVE_CHASE_IRQ_STACK_LINK = 4010,
 
-  // Native: Unexpectedly encountered a kernel mode pointer while attempting to unwind user-mode
-  // stack
+  // Native: Unexpectedly encountered a kernel mode pointer while attempting to unwind user-mode stack
   ERR_NATIVE_UNEXPECTED_KERNEL_ADDRESS = 4011,
 
   // Native: Unable to locate the PID page mapping for the current instruction pointer
