@@ -835,6 +835,7 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 	// ruby_run_node  which is the main executor function since Ruby v1.9.0
 	// https://github.com/ruby/ruby/blob/587e6800086764a1b7c959976acef33e230dccc2/main.c#L47
 	interpSymbolName := libpf.SymbolName("rb_vm_exec")
+	fallbackInterpSymbolName := libpf.SymbolName("vm_exec_core")
 	if version < rubyVersion(2, 6, 0) {
 		interpSymbolName = libpf.SymbolName("ruby_exec_node")
 	}
@@ -855,24 +856,39 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 		log.Debugf("Direct lookup of %v failed: %v, will try fallback", interpSymbolName, err)
 	}
 
+	extraInterpRanges, err := info.GetSymbolAsRanges(fallbackInterpSymbolName)
+	if err != nil {
+		log.Debugf("Direct lookup of %v failed: %v, will try fallback", fallbackInterpSymbolName, err)
+	}
+
 	err = ef.VisitUntilSymbol(func(s libpf.Symbol) bool {
 		if s.Name == currentEcSymbolName {
 			currentEcSymbol = &s
 		}
+		if s.Name == currentCtxSymbol {
+			currentCtxPtr = s.Address
+		}
 		if len(interpRanges) == 0 && s.Name == interpSymbolName {
 			interpRanges = info.SymbolAsRanges(&s)
 		}
-		if len(interpRanges) > 0 && currentEcSymbol != nil {
+		if len(extraInterpRanges) == 0 && s.Name == fallbackInterpSymbolName {
+			extraInterpRanges = info.SymbolAsRanges(&s)
+		}
+		if len(interpRanges) > 0 && len(extraInterpRanges) > 0 && currentEcSymbol != nil && currentCtxPtr != 0 {
 			return false
 		}
 		return true
 	})
 
+	if len(extraInterpRanges) > 0 {
+		interpRanges = append(interpRanges, extraInterpRanges[0])
+	}
+
 	if currentEcSymbol != nil {
 		currentEcTlsOffset = currentEcSymbol.Address
 	}
 
-	log.Infof("Discovered EC %x, interp ranges: %v", currentEcTlsOffset, interpRanges)
+	log.Infof("Discovered EC %x, interp ranges: %v, currentCtxPtr: %x", currentEcTlsOffset, interpRanges, currentCtxPtr)
 
 	rid := &rubyData{
 		version:            version,
