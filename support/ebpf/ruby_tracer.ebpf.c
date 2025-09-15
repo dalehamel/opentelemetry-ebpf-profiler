@@ -18,7 +18,7 @@ bpf_map_def SEC("maps") ruby_procs = {
 // we start running out of instructions in the walk_ruby_stack program, one
 // option is to adjust this number downwards.
 // NOTE the maximum size stack is this times 33
-#define FRAMES_PER_WALK_RUBY_STACK 27
+#define FRAMES_PER_WALK_RUBY_STACK 64
 
 // Ruby VM frame flags are internal indicators for the VM interpreter to
 // treat frames in a dedicated way.
