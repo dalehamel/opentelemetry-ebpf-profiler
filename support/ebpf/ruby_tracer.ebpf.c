@@ -144,6 +144,11 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
   u32 iseq_size;
   s64 n;
 
+  if (record ->rubyUnwindState.last_pushed_frame == stack_ptr) {
+    DEBUG_PRINT("ruby: already pushed ruby frame at 0x%llx, skipping", (u64) stack_ptr);
+    stack_ptr += rubyinfo->size_of_control_frame_struct;
+  }
+
   UNROLL for (u32 i = 0; i < FRAMES_PER_WALK_RUBY_STACK; ++i)
   {
     pc        = 0;
@@ -226,13 +231,16 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
       DEBUG_PRINT("ruby: failed to push frame");
       return error;
     }
+    DEBUG_PRINT("ruby: pushed a ruby frame at 0x%llx", (u64) stack_ptr);
+    record ->rubyUnwindState.last_pushed_frame = stack_ptr;
     increment_metric(metricID_UnwindRubyFrames);
 
   skip:
     if (last_stack_frame <= stack_ptr) {
+      DEBUG_PRINT("ruby: bottomed out the stack at 0x%llx", (u64) stack_ptr);
       // We have processed all frames in the Ruby VM and can stop here.
       *next_unwinder = PROG_UNWIND_NATIVE;
-      return ERR_OK;
+      goto save_state;
     }
     stack_ptr += rubyinfo->size_of_control_frame_struct;
   }
