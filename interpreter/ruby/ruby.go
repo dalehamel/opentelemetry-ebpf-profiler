@@ -824,8 +824,9 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		var err error
 		classPath, iseqBody, err = r.processCmeFrame(cme)
 		if err != nil {
-			log.Errorf("Tried and failed to process as CME frame %v", err)
-			return err
+			log.Warnf("Tried and failed to process as CME frame %v", err)
+			iseqAddr := r.rm.Ptr(cfp + libpf.Address(vms.control_frame_struct.iseq))
+			iseqBody = r.rm.Ptr(iseqAddr + libpf.Address(vms.iseq_struct.body))
 		}
 	}
 	// The Ruby VM program counter that was extracted from the current call frame is embedded in
