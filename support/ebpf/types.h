@@ -659,6 +659,8 @@ typedef struct PHPUnwindState {
 typedef struct RubyUnwindState {
   // Pointer to the next control frame struct in the Ruby VM stack we want to unwind.
   void *stack_ptr;
+  // Last pushed frame
+  void *last_pushed_frame;
   // Pointer to the last control frame struct in the Ruby VM stack we want to handle.
   void *last_stack_frame;
 } RubyUnwindState;
