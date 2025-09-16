@@ -318,7 +318,7 @@ static EBPF_INLINE int unwind_ruby(struct pt_regs *ctx)
     DEBUG_PRINT("ruby: got TLS offset %llu", tls_symbol);
     // assume libruby.so is the first module, which is usually the case.
     // ruby interpreter also only triggers on libruby.so matches, so no need to check for static case.
-    u64 tls_current_ec_addr = addr_for_tls_symbol(tls_symbol, true, 1);
+    u64 tls_current_ec_addr = addr_for_tls_symbol(tls_symbol, true, 2);
     DEBUG_PRINT("ruby: got TLS addr 0x%llx", (u64)tls_current_ec_addr);
 
     if (bpf_probe_read_user(
