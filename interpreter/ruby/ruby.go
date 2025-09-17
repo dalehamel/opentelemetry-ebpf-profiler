@@ -77,13 +77,13 @@ const (
 const (
 	VM_ENV_DATA_INDEX_ME_CREF = 2 * 8 // FIXME don't just multiply by 8
 	VM_ENV_DATA_INDEX_SPECVAL = 1 * 8
-	VM_ENV_FLAG_LOCAL       = 0x02
+	VM_ENV_FLAG_LOCAL         = 0x02
 
-	RUBY_FL_USHIFT          = 12
-	IMEMO_MASK              = 0x0f
-	IMEMO_CREF              = 1 /*!< class reference */
-	IMEMO_SVAR              = 2 /*!< special variable */
-	IMEMO_MENT              = 6
+	RUBY_FL_USHIFT = 12
+	IMEMO_MASK     = 0x0f
+	IMEMO_CREF     = 1 /*!< class reference */
+	IMEMO_SVAR     = 2 /*!< special variable */
+	IMEMO_MENT     = 6
 )
 
 var (
@@ -789,7 +789,7 @@ func (r *rubyInstance) checkMethodEntry(envMeCref libpf.Address, svarAllowed boo
 	}
 
 	rbasicFlags := r.rm.Ptr(envMeCref)
-	imemoType := (rbasicFlags >> RUBY_FL_USHIFT) & IMEMO_MASK;
+	imemoType := (rbasicFlags >> RUBY_FL_USHIFT) & IMEMO_MASK
 
 	switch imemoType {
 	case IMEMO_MENT:
@@ -818,7 +818,7 @@ func (r *rubyInstance) checkCmeFrame(cfp libpf.Address) (libpf.Address, error) {
 
 	flags := r.rm.Ptr(checkEp)
 
-	for flags & VM_ENV_FLAG_LOCAL != 0 {
+	for flags&VM_ENV_FLAG_LOCAL != 0 {
 		methodEntry, err := r.checkMethodEntry(envMeCref, false)
 		if err != nil {
 			checkEp = envSpecval
@@ -848,7 +848,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	cfp := libpf.Address(frame.File)
 	cme, err := r.checkCmeFrame(cfp)
 
-	if err != nil{ // TODO delete RubyCME frame type, it is no longer needed
+	if err != nil { // TODO delete RubyCME frame type, it is no longer needed
 		log.Debugf("Couldn't handle as CME frame, falling back to iseq frame")
 		// If the frame type from the eBPF Ruby unwinder is iseq type, we receive
 		// the address to the instruction sequence body in the Files field.
