@@ -1,0 +1,497 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package ruby
+
+import (
+	"bytes"
+	"debug/elf"
+	"encoding/binary"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"unsafe"
+
+	"go.opentelemetry.io/ebpf-profiler/remotememory"
+)
+
+// Runtime linker structures not available in standard packages
+type rDebug struct {
+	Version  int32
+	_        int32  // padding
+	LinkMap  uint64 // struct link_map *
+	LdBrk    uint64
+	State    int32
+	_        int32 // padding
+	LdBase   uint64
+	Loader   uint64
+	LdLoaded int32
+	_        int32 // padding
+}
+
+type linkMap struct {
+	LAddr uint64 // Base address shared object is loaded at
+	LName uint64 // Absolute pathname where object was found (char*)
+	LLd   uint64 // Dynamic section of the shared object (Elf64_Dyn*)
+	LNext uint64 // Chain of loaded objects (struct link_map*)
+	LPrev uint64 // Previous in chain
+}
+
+type libraryInfo struct {
+	name        string
+	path        string
+	baseAddress uint64
+	isVirtual   bool
+	loadOrder   int
+	hasTLS      bool
+}
+
+type processInspector struct {
+	pid int
+	rm  remotememory.RemoteMemory
+}
+
+func newProcessInspector(pid int, rm remotememory.RemoteMemory) (*processInspector, error) {
+	return &processInspector{
+		pid: pid,
+		rm:  rm,
+	}, nil
+}
+
+func (pi *processInspector) close() error {
+	return nil
+}
+
+func (pi *processInspector) readMemory(addr uint64, size int) ([]byte, error) {
+	buf := make([]byte, size)
+	_, err := pi.rm.ReadAt(buf, int64(addr))
+	if err != nil {
+		return buf, err
+	}
+	return buf, nil
+}
+
+func (pi *processInspector) readString(addr uint64) (string, error) {
+	var result []byte
+	offset := uint64(0)
+
+	for {
+		buf, err := pi.readMemory(addr+offset, 256)
+		if err != nil {
+			if len(result) > 0 {
+				return string(result), nil
+			}
+			return "", err
+		}
+
+		idx := bytes.IndexByte(buf, 0)
+		if idx >= 0 {
+			result = append(result, buf[:idx]...)
+			break
+		}
+
+		result = append(result, buf...)
+		offset += uint64(len(buf))
+
+		if len(result) > 4096 {
+			break
+		}
+	}
+
+	return string(result), nil
+}
+
+func (pi *processInspector) getAuxVector() (map[uint64]uint64, error) {
+	auxvPath := fmt.Sprintf("/proc/%d/auxv", pi.pid)
+	data, err := os.ReadFile(auxvPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read auxv: %v", err)
+	}
+
+	auxv := make(map[uint64]uint64)
+	reader := bytes.NewReader(data)
+
+	for {
+		var typ, val uint64
+		if err := binary.Read(reader, binary.LittleEndian, &typ); err != nil {
+			break
+		}
+		if err := binary.Read(reader, binary.LittleEndian, &val); err != nil {
+			break
+		}
+		if typ == 0 {
+			break
+		}
+		auxv[typ] = val
+	}
+
+	return auxv, nil
+}
+
+// Check if a library has a TLS section by reading its ELF header and program headers
+func (pi *processInspector) hasTLSSection(baseAddr uint64) bool {
+	// Read ELF header
+	ehdrBuf, err := pi.readMemory(baseAddr, int(unsafe.Sizeof(elf.Header64{})))
+	if err != nil {
+		return false
+	}
+
+	var ehdr elf.Header64
+	reader := bytes.NewReader(ehdrBuf)
+	if err := binary.Read(reader, binary.LittleEndian, &ehdr); err != nil {
+		return false
+	}
+
+	// Verify ELF magic
+	if ehdr.Ident[0] != '\x7f' || ehdr.Ident[1] != 'E' ||
+		ehdr.Ident[2] != 'L' || ehdr.Ident[3] != 'F' {
+		return false
+	}
+
+	// Read program headers
+	phOffset := baseAddr + ehdr.Phoff
+	for i := uint16(0); i < ehdr.Phnum; i++ {
+		phAddr := phOffset + uint64(i)*uint64(ehdr.Phentsize)
+
+		phBuf, err := pi.readMemory(phAddr, int(unsafe.Sizeof(elf.Prog64{})))
+		if err != nil {
+			continue
+		}
+
+		var phdr elf.Prog64
+		reader := bytes.NewReader(phBuf)
+		if err := binary.Read(reader, binary.LittleEndian, &phdr); err != nil {
+			continue
+		}
+
+		if elf.ProgType(phdr.Type) == elf.PT_TLS {
+			return true
+		}
+	}
+
+	return false
+}
+
+// Get the base address of the main executable (for PIE binaries)
+func (pi *processInspector) getMainExecutableBase(auxv map[uint64]uint64) (uint64, error) {
+	// AT_PHDR from auxv
+	const AT_PHDR = 3
+	const AT_PHENT = 4
+	const AT_PHNUM = 5
+
+	phdr := auxv[AT_PHDR]
+	if phdr == 0 {
+		return 0, fmt.Errorf("AT_PHDR not found")
+	}
+
+	phent := auxv[AT_PHENT]
+	phnum := auxv[AT_PHNUM]
+
+	for i := uint64(0); i < phnum; i++ {
+		phdrAddr := phdr + i*phent
+
+		buf, err := pi.readMemory(phdrAddr, int(unsafe.Sizeof(elf.Prog64{})))
+		if err != nil {
+			continue
+		}
+
+		var ph elf.Prog64
+		reader := bytes.NewReader(buf)
+		if err := binary.Read(reader, binary.LittleEndian, &ph); err != nil {
+			continue
+		}
+
+		if elf.ProgType(ph.Type) == elf.PT_PHDR {
+			base := phdr - ph.Vaddr
+			return base, nil
+		}
+	}
+
+	// Fallback: try to parse /proc/pid/maps
+	mapsPath := fmt.Sprintf("/proc/%d/maps", pi.pid)
+	data, err := os.ReadFile(mapsPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read maps: %v", err)
+	}
+
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, "r-xp") && (strings.Contains(line, "/ruby") || strings.Contains(line, "/bin/")) {
+			fields := strings.Fields(line)
+			if len(fields) >= 1 {
+				addrRange := strings.Split(fields[0], "-")
+				if len(addrRange) > 0 {
+					base, err := strconv.ParseUint(addrRange[0], 16, 64)
+					if err == nil {
+						return base, nil
+					}
+				}
+			}
+		}
+	}
+
+	return 0, fmt.Errorf("could not determine main executable base address")
+}
+
+func (pi *processInspector) findDynamicSection(phdr uint64, phent uint64, phnum uint64, baseAddr uint64) (uint64, error) {
+	for i := uint64(0); i < phnum; i++ {
+		phdrAddr := phdr + i*phent
+
+		buf, err := pi.readMemory(phdrAddr, int(unsafe.Sizeof(elf.Prog64{})))
+		if err != nil {
+			return 0, fmt.Errorf("failed to read program header %d: %v", i, err)
+		}
+
+		var ph elf.Prog64
+		reader := bytes.NewReader(buf)
+		if err := binary.Read(reader, binary.LittleEndian, &ph); err != nil {
+			continue
+		}
+
+		if elf.ProgType(ph.Type) == elf.PT_DYNAMIC {
+			dynAddr := ph.Vaddr
+			if dynAddr < 0x400000 {
+				dynAddr += baseAddr
+			}
+			return dynAddr, nil
+		}
+	}
+
+	return 0, fmt.Errorf("PT_DYNAMIC segment not found")
+}
+
+func (pi *processInspector) findDebugPtr(dynAddr uint64) (uint64, error) {
+	maxEntries := 1000
+
+	for i := 0; i < maxEntries; i++ {
+		addr := dynAddr + uint64(i*16)
+
+		buf, err := pi.readMemory(addr, 16)
+		if err != nil {
+			return 0, fmt.Errorf("failed to read dynamic entry at 0x%x: %v", addr, err)
+		}
+
+		var dyn elf.Dyn64
+		reader := bytes.NewReader(buf)
+		if err := binary.Read(reader, binary.LittleEndian, &dyn); err != nil {
+			return 0, fmt.Errorf("failed to parse dynamic entry: %v", err)
+		}
+
+		if elf.DynTag(dyn.Tag) == elf.DT_NULL {
+			break
+		}
+
+		// DT_DEBUG is not defined in the elf package
+		const DT_DEBUG = 21
+		if dyn.Tag == DT_DEBUG {
+			if dyn.Val == 0 {
+				return 0, fmt.Errorf("DT_DEBUG found but value is NULL")
+			}
+			return dyn.Val, nil
+		}
+	}
+
+	return 0, fmt.Errorf("DT_DEBUG not found")
+}
+
+// Get the link map starting point from r_debug
+func (pi *processInspector) getLinkMapStart() (uint64, error) {
+	// Constants for auxiliary vector
+	const (
+		AT_PHDR  = 3
+		AT_PHENT = 4
+		AT_PHNUM = 5
+	)
+
+	// Get auxiliary vector
+	auxv, err := pi.getAuxVector()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get auxiliary vector: %v", err)
+	}
+
+	phdr := auxv[AT_PHDR]
+	phent := auxv[AT_PHENT]
+	phnum := auxv[AT_PHNUM]
+
+	// Get base address for PIE binaries
+	baseAddr, _ := pi.getMainExecutableBase(auxv)
+
+	// Find dynamic section
+	dynAddr, err := pi.findDynamicSection(phdr, phent, phnum, baseAddr)
+	if err != nil {
+		return 0, fmt.Errorf("failed to find dynamic section: %v", err)
+	}
+
+	// Find debug pointer
+	debugPtr, err := pi.findDebugPtr(dynAddr)
+	if err != nil {
+		return 0, fmt.Errorf("failed to find debug pointer: %v", err)
+	}
+
+	// Read r_debug structure
+	buf, err := pi.readMemory(debugPtr, int(unsafe.Sizeof(rDebug{})))
+	if err != nil {
+		return 0, fmt.Errorf("failed to read r_debug structure: %v", err)
+	}
+
+	var rd rDebug
+	reader := bytes.NewReader(buf)
+	if err := binary.Read(reader, binary.LittleEndian, &rd); err != nil {
+		return 0, fmt.Errorf("failed to parse r_debug: %v", err)
+	}
+
+	if rd.Version != 1 {
+		return 0, fmt.Errorf("unexpected r_debug version: %d", rd.Version)
+	}
+
+	if rd.LinkMap == 0 {
+		return 0, fmt.Errorf("link map pointer is NULL")
+	}
+
+	return rd.LinkMap, nil
+}
+
+// getLoadedLibraries returns all loaded libraries in their load order
+func (pi *processInspector) getLoadedLibraries() ([]libraryInfo, error) {
+	linkMapStart, err := pi.getLinkMapStart()
+	if err != nil {
+		return nil, err
+	}
+
+	var libraries []libraryInfo
+	current := linkMapStart
+	loadOrder := 0
+	maxLibraries := 1000
+
+	for current != 0 && loadOrder < maxLibraries {
+		buf, err := pi.readMemory(current, int(unsafe.Sizeof(linkMap{})))
+		if err != nil {
+			return nil, fmt.Errorf("failed to read link map entry at 0x%x: %v", current, err)
+		}
+
+		var lm linkMap
+		reader := bytes.NewReader(buf)
+		if err := binary.Read(reader, binary.LittleEndian, &lm); err != nil {
+			return nil, fmt.Errorf("failed to parse link map entry: %v", err)
+		}
+
+		info := libraryInfo{
+			baseAddress: lm.LAddr,
+			loadOrder:   loadOrder,
+		}
+
+		// Read library name if available
+		if lm.LName != 0 {
+			name, err := pi.readString(lm.LName)
+			if err == nil && name != "" {
+				info.path = name
+				info.name = filepath.Base(name)
+
+				// Check if it's a virtual DSO
+				if strings.Contains(name, "linux-vdso") ||
+					strings.Contains(name, "linux-gate") ||
+					strings.HasPrefix(name, "[") {
+					info.isVirtual = true
+				}
+			}
+		} else if loadOrder == 0 {
+			// Main executable usually has empty name
+			info.name = "[main]"
+			info.path = ""
+		}
+
+		// Check for TLS section if base address is valid
+		if lm.LAddr != 0 {
+			info.hasTLS = pi.hasTLSSection(lm.LAddr)
+		}
+
+		libraries = append(libraries, info)
+		current = lm.LNext
+		loadOrder++
+	}
+
+	if loadOrder == maxLibraries {
+		return nil, fmt.Errorf("too many libraries (limit: %d)", maxLibraries)
+	}
+
+	return libraries, nil
+}
+
+// findTLSModuleID finds the TLS module ID for a specific library
+func (pi *processInspector) findTLSModuleID(targetLibrary string) (int, error) {
+	libraries, err := pi.getLoadedLibraries()
+	if err != nil {
+		return 0, err
+	}
+
+	tlsModuleID := 0
+
+	for _, lib := range libraries {
+		// If it has TLS, increment the module ID
+		if lib.hasTLS {
+			tlsModuleID++
+		}
+
+		// Check if this is the target library
+		if lib.path != "" && strings.Contains(lib.path, targetLibrary) {
+			if lib.hasTLS {
+				return tlsModuleID, nil
+			} else {
+				return 0, fmt.Errorf("%s does not have a TLS section", targetLibrary)
+			}
+		}
+	}
+
+	return 0, fmt.Errorf("%s not found in loaded libraries", targetLibrary)
+}
+
+// libcType represents the C library implementation
+type libcType int
+
+const (
+	libcUnknown libcType = iota
+	libcGlibc
+	libcMusl
+)
+
+func (lt libcType) String() string {
+	switch lt {
+	case libcGlibc:
+		return "glibc"
+	case libcMusl:
+		return "musl"
+	default:
+		return "unknown"
+	}
+}
+
+func detectLibc(libs []libraryInfo) libcType {
+	for _, lib := range libs {
+		// musl detection - the loader/libc is typically named ld-musl-*.so.1
+		// Examples:
+		// - /lib/ld-musl-x86_64.so.1
+		// - /lib/ld-musl-aarch64.so.1
+		// - /lib/libc.musl-x86_64.so.1 (Alpine Linux)
+		if strings.Contains(lib.path, "ld-musl") || strings.Contains(lib.path, "libc.musl") {
+			return libcMusl
+		}
+
+		// glibc detection - look for the characteristic libc.so.6
+		// Examples:
+		// - /lib/x86_64-linux-gnu/libc.so.6
+		// - /lib64/libc.so.6
+		// - /usr/lib/libc.so.6
+		if strings.Contains(lib.name, "libc.so.6") || strings.Contains(lib.path, "libc.so.6") {
+			return libcGlibc
+		}
+
+		// Alternative glibc detection - look for the loader
+		// - /lib64/ld-linux-x86-64.so.2
+		// - /lib/ld-linux.so.2
+		if strings.Contains(lib.path, "ld-linux") && strings.Contains(lib.path, ".so.2") {
+			return libcGlibc
+		}
+	}
+	return libcUnknown
+}
