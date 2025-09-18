@@ -76,12 +76,14 @@ fields = {
     'rb_method_entry_struct.flags': offset_of('rb_method_entry_struct', 'flags'),
     'rb_method_entry_struct.defined_class': offset_of('rb_method_entry_struct', 'defined_class'),
     'rb_method_entry_struct.def': offset_of('rb_method_entry_struct', 'def'),
+    'rb_method_entry_struct.owner': offset_of('rb_method_entry_struct', 'owner'),
 
     'rclass_and_rb_classext_t.classext': offset_of('RClass_and_rb_classext_t', 'classext'),
     'rb_classext_struct.classpath': offset_of('rb_classext_struct', 'classpath'),
 
     'rb_method_definition_struct.method_type': offset_of('rb_method_definition_struct', 'type'),
     'rb_method_definition_struct.body': offset_of('rb_method_definition_struct', 'body'),
+    'rb_method_definition_struct.original_id': offset_of('rb_method_definition_struct', 'original_id'),
 
     'rb_method_iseq_struct.iseqptr': offset_of('rb_method_iseq_struct', 'iseqptr'),
 }
