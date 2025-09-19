@@ -27,9 +27,9 @@ bpf_map_def SEC("maps") ruby_procs = {
 #define RUBY_FRAME_FLAG_LAMBDA  0x0100
 
 // Record a Ruby cfp frame
-static EBPF_INLINE ErrorCode push_ruby_cfp(Trace *trace, u64 file, u64 line)
+static EBPF_INLINE ErrorCode push_ruby_cfp(Trace *trace, u64 file, u64 line, u64 iseq_body)
 {
-  return _push(trace, file, line, FRAME_MARKER_RUBY);
+  return _push_with_extra(trace, file, line, iseq_body, FRAME_MARKER_RUBY);
 }
 
 // walk_ruby_stack processes a Ruby VM stack, extracts information from the individual frames and
@@ -221,7 +221,7 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
     // For symbolization of the frame we forward the information about the instruction sequence
     // and program counter to user space.
     // From this we can then extract information like file or function name and line number.
-    ErrorCode error = push_ruby_cfp(trace, (u64)stack_ptr, pc);
+    ErrorCode error = push_ruby_cfp(trace, (u64)stack_ptr, pc, (u64) iseq_body);
     if (error) {
       DEBUG_PRINT("ruby: failed to push frame");
       return error;

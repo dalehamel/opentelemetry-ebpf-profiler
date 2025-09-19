@@ -359,6 +359,38 @@ static inline EBPF_INLINE ErrorCode _push(Trace *trace, u64 file, u64 line, u8 f
   return _push_with_max_frames(trace, file, line, frame_type, 0, MAX_NON_ERROR_FRAME_UNWINDS);
 }
 
+// Push the file ID, line number and frame type into FrameList
+static inline EBPF_INLINE ErrorCode _push_with_extra(Trace *trace, u64 file, u64 line, u64 extra_addr, u8 frame_type)
+{
+  if (trace->stack_len >= MAX_NON_ERROR_FRAME_UNWINDS) {
+    DEBUG_PRINT("unable to push frame: stack is full");
+    increment_metric(metricID_UnwindErrStackLengthExceeded);
+    return ERR_STACK_LENGTH_EXCEEDED;
+  }
+
+#ifdef TESTING_COREDUMP
+  // tools/coredump uses CGO to build the eBPF code. This dispatches
+  // the frame information directly to helper implemented in ebpfhelpers.go.
+  int __push_frame(u64, u64, u64, u8, u8);
+  trace->stack_len++;
+  return __push_frame(__cgo_ctx->id, file, line, frame_type, return_address);
+#else
+	// Utilize the fact that an address is typically actually 48 bits, to store
+  // an additional address
+	u64 extra = (u64)extra_addr & 0x0000FFFFFFFFFFFFULL;
+	Frame frame = {
+    .file_id        = file,
+    .addr_or_line   = line,
+    .kind           = frame_type,
+  };
+	__builtin_memcpy(frame.pad, &extra, 6);
+  trace->frames[trace->stack_len++] = frame;
+
+  return ERR_OK;
+#endif
+
+}
+
 // Push a critical error frame.
 static inline EBPF_INLINE ErrorCode push_error(Trace *trace, ErrorCode error)
 {

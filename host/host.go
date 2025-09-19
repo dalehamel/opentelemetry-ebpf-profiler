@@ -44,6 +44,7 @@ type Frame struct {
 	Lineno        libpf.AddressOrLineno
 	Type          libpf.FrameType
 	ReturnAddress bool
+	Extra         libpf.AddressOrLineno
 }
 
 type Trace struct {
