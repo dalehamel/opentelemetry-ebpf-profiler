@@ -973,7 +973,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	cfp := libpf.Address(frame.File)
 	cme, err := r.checkCmeFrame(cfp)
 
-	iseqBodyAddr := frame.Extra
+	iseqBodyAddr := libpf.Address(frame.Extra)
 	log.Debugf("Got iseq body addr 0x%08x", iseqBodyAddr)
 	pc := r.rm.Ptr(cfp)
 
@@ -988,18 +988,8 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		//
 		// rb_iseq_constant_body
 		// https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L311
-
 		iseqAddr := r.rm.Ptr(cfp + libpf.Address(vms.control_frame_struct.iseq))
 		iseqBody = r.rm.Ptr(iseqAddr + libpf.Address(vms.iseq_struct.body))
-
-		if iseqBody == 0  && iseqBodyAddr != 0 {
-			log.Debugf("Falling back to iseqbody jammed into padding")
-			iseqBody = libpf.Address(iseqBodyAddr)
-		}
-		if iseqBody == 0 {
-			log.Debugf("Couldn't handle CFP 0x%08x (pc: 0x%08x, 0x%08x) as CME frame, falling back to iseq frame, (addr: 0x%08x) (body: 0x%08x vs 0x%08x) %v", cfp, frame.Lineno, pc,  iseqAddr, iseqBody, iseqBodyAddr, err)
-			return nil
-		}
 	} else {
 		log.Debugf("Got ruby CME at 0x%08x", cme)
 		var err error
@@ -1009,6 +999,15 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 			iseqAddr := r.rm.Ptr(cfp + libpf.Address(vms.control_frame_struct.iseq))
 			iseqBody = r.rm.Ptr(iseqAddr + libpf.Address(vms.iseq_struct.body))
 		}
+	}
+
+	if iseqBody == 0  && iseqBodyAddr != 0 {
+		log.Debugf("Falling back to iseqbody jammed into padding")
+		iseqBody = iseqBodyAddr
+	}
+	if iseqBody == 0 {
+		log.Debugf("Couldn't handle CFP 0x%08x (pc: 0x%08x, 0x%08x) as CME frame, falling back to iseq frame, (body: 0x%08x vs 0x%08x) %v", cfp, frame.Lineno, pc, iseqBody, iseqBodyAddr, err)
+		return nil
 	}
 
 	if methodName == libpf.NullString {
@@ -1025,8 +1024,15 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		if !ok {
 			lineNo, err := r.getRubyLineNo(iseqBody, uint64(pc))
 			if err != nil {
-				lineNo = 0
-				log.Warnf("RubySymbolizer: Failed to get line number %v", err)
+				if iseqBody != iseqBodyAddr {
+					// Last ditch effort to get something usable
+					iseqBody = iseqBodyAddr
+					lineNo, err = r.getRubyLineNo(iseqBody, uint64(pc))
+				}
+				if err != nil {
+					lineNo = 0
+					log.Warnf("RubySymbolizer: Failed to get line number %v", err)
+				}
 			}
 
 			sourceFileNamePtr := r.rm.Ptr(iseqBody +
