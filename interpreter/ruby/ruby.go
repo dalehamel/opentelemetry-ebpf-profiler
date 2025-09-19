@@ -47,8 +47,14 @@ const (
 //nolint:lll
 const (
 
-	//RUBY_T_CLASS    = 0x02,
+	//RUBY_T_CLASS
 	rubyTClass = 0x2
+	//https://github.com/ruby/ruby/blob/c149708018135595b2c19c5f74baf9475674f394/include/ruby/internal/value_type.h#L114
+
+	//RUBY_T_ICLASS
+	//https://github.com/ruby/ruby/blob/c149708018135595b2c19c5f74baf9475674f394/include/ruby/internal/value_type.h#L138
+	rubyTIClass = 0x1c
+
 	// RUBY_T_STRING
 	// https://github.com/ruby/ruby/blob/c149708018135595b2c19c5f74baf9475674f394/include/ruby/internal/value_type.h#L117
 	rubyTString = 0x5
@@ -731,25 +737,52 @@ func (r *rubyInstance) getRubyLineNo(iseqBody libpf.Address, pc uint64) (uint32,
 
 func (r *rubyInstance) readClassName(classAddr libpf.Address) (libpf.String, error) {
 	var classPath libpf.String
+	var realClassAddr libpf.Address
 	var err error
 
 	// TODO refactor this out so that we can also use it on owner member
 	classFlags := r.rm.Ptr(classAddr)
 	classMask := classFlags & rubyTMask
 
-	if classMask == rubyTClass { // note we can also get iclass here (0x1c) but we don't seem to be able to read those
-		classpathAddr := classAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath)
-		classpathPtr := r.rm.Ptr(classpathAddr)
+	switch classMask {
+	case rubyTClass:
+		realClassAddr = classAddr
 
-		if classpathPtr != 0 {
-			classPath, err = r.getStringCached(classpathPtr, r.readRubyString)
-			if err != nil {
-				return libpf.NullString, fmt.Errorf("unable to read classpath string %x %v", classpathPtr, err)
-			}
+		// Should also check if it is a singleton
+		// https://github.com/ruby/ruby/blob/b627532/vm_backtrace.c#L1934-L1937
+		// https://github.com/ruby/ruby/blob/b627532/internal/class.h#L528
+
+		// If it is neither a class nor a module, we should handle what i guess is an anonymous class?
+		// https://github.com/ruby/ruby/blob/b627532/vm_backtrace.c#L1936-L1937 (see rb_class2name)
+
+		// #define RCLASS_EXT_PRIME(c) (&((struct RClass_and_rb_classext_t*)(c))->classext)
+		// #define RCLASS_ATTACHED_OBJECT(c) (RCLASS_EXT_PRIME(c)->as.singleton_class.attached_object)
+	case rubyTIClass:
+		//https://github.com/ruby/ruby/blob/b627532/vm_backtrace.c#L1931-L1933
+
+		// Get the 'klass'
+		// struct RBasic {
+		//    VALUE                      flags;                /*     0     8 */
+		//    const VALUE                klass;                /*     8     8 */
+		// ...
+		RBASIC_KCLASS_OFFSET := libpf.Address(8) // TODO readthis from `RBasic` struct and store on vmstructs
+
+		if klassAddr := r.rm.Ptr(classAddr + RBASIC_KCLASS_OFFSET); klassAddr != 0 {
+			log.Debugf("Using klass for iclass type")
+			realClassAddr = klassAddr
 		}
-	} else {
-		return libpf.NullString, fmt.Errorf("object at 0x%08X is not a class (mask: %08X)", classAddr, classMask)
+	default:
+		return libpf.NullString, fmt.Errorf("object at 0x%08X is not a handled class (mask: %08X)", classAddr, classMask)
 	}
+
+	classpathPtr := r.rm.Ptr(realClassAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath))
+	if classpathPtr != 0 {
+		classPath, err = r.getStringCached(classpathPtr, r.readRubyString)
+		if err != nil {
+			return libpf.NullString, fmt.Errorf("unable to read classpath string %x %v", classpathPtr, err)
+		}
+	}
+
 	return classPath, nil
 }
 
@@ -782,6 +815,9 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, lib
 			log.Errorf("Failed to read class name for iseq: %v", err)
 		}
 
+		// FIXME - it is possible that we are reading the classpath and returning it even if we error later
+		// should we return nullstring in that case?
+
 		methodBody := r.rm.Ptr(methodDefinition + libpf.Address(vms.rb_method_definition_struct.body))
 		if methodBody == 0 {
 			log.Errorf("method body was empty")
@@ -805,6 +841,8 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, lib
 		}
 
 		originalId := r.rm.Uint64(methodDefinition + libpf.Address(vms.rb_method_definition_struct.original_id))
+
+		// TODO refactor this into function that actually just mimics `id2sym`
 
 		// RUBY_ID_SCOPE_SHIFT = 4
 		// https://github.com/ruby/ruby/blob/797a4115bbb249c4f5f11e1b4bacba7781c68cee/template/id.h.tmpl#L30
@@ -1001,7 +1039,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		}
 	}
 
-	if iseqBody == 0  && iseqBodyAddr != 0 {
+	if iseqBody == 0 && iseqBodyAddr != 0 {
 		log.Debugf("Falling back to iseqbody jammed into padding")
 		iseqBody = iseqBodyAddr
 	}
