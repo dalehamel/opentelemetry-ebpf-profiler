@@ -826,20 +826,17 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, lib
 			log.Errorf("Failed to read class name for iseq: %v", err)
 		}
 
-		// FIXME - it is possible that we are reading the classpath and returning it even if we error later
-		// should we return nullstring in that case?
-
 		methodBody := r.rm.Ptr(methodDefinition + libpf.Address(vms.rb_method_definition_struct.body))
 		if methodBody == 0 {
 			log.Errorf("method body was empty")
-			return classPath, libpf.NullString, iseqBody, fmt.Errorf("unable to read method body")
+			return libpf.NullString, libpf.NullString, iseqBody, fmt.Errorf("unable to read method body")
 		}
 
 		iseqBody = r.rm.Ptr(methodBody + libpf.Address(vms.rb_method_iseq_struct.iseqptr+vms.iseq_struct.body))
 
 		if iseqBody == 0 {
 			log.Errorf("iseq body was empty")
-			return classPath, libpf.NullString, iseqBody, fmt.Errorf("unable to read iseq body")
+			return libpf.NullString, libpf.NullString, iseqBody, fmt.Errorf("unable to read iseq body")
 		}
 	case vmMethodTypeCfunc:
 		var cfuncName libpf.String
@@ -887,7 +884,7 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, lib
 		lastId := r.rm.Uint64(r.r.globalSymbolsAddr)
 
 		if serial > lastId {
-			return classPath, libpf.NullString, iseqBody, fmt.Errorf("invalid serial %d, greater than last id %d", serial, lastId)
+			return libpf.NullString, libpf.NullString, iseqBody, fmt.Errorf("invalid serial %d, greater than last id %d", serial, lastId)
 		}
 
 		ids := r.rm.Ptr(r.r.globalSymbolsAddr + libpf.Address(IDS_OFFSET))
@@ -927,7 +924,7 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, lib
 		}
 
 		if idx > idsLen {
-			return classPath, libpf.NullString, iseqBody, fmt.Errorf("invalid idx %d, number of ids %d", idx, idsLen)
+			return libpf.NullString, libpf.NullString, iseqBody, fmt.Errorf("invalid idx %d, number of ids %d", idx, idsLen)
 		}
 
 		array := r.rm.Ptr(idsPtr + libpf.Address(idx*8)) // TODO don't hardcode 8 here
