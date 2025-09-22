@@ -51,6 +51,10 @@ const (
 	rubyTClass = 0x2
 	//https://github.com/ruby/ruby/blob/c149708018135595b2c19c5f74baf9475674f394/include/ruby/internal/value_type.h#L114
 
+	//RUBY_T_MODULE
+	// https://github.com/ruby/ruby/blob/c149708018135595b2c19c5f74baf9475674f394/include/ruby/internal/value_type.h#L115C5-L115C74
+	rubyTModule = 0x3
+
 	//RUBY_T_ICLASS
 	//https://github.com/ruby/ruby/blob/c149708018135595b2c19c5f74baf9475674f394/include/ruby/internal/value_type.h#L138
 	rubyTIClass = 0x1c
@@ -737,16 +741,15 @@ func (r *rubyInstance) getRubyLineNo(iseqBody libpf.Address, pc uint64) (uint32,
 
 func (r *rubyInstance) readClassName(classAddr libpf.Address) (libpf.String, error) {
 	var classPath libpf.String
-	var realClassAddr libpf.Address
+	var classpathPtr libpf.Address
 	var err error
 
-	// TODO refactor this out so that we can also use it on owner member
 	classFlags := r.rm.Ptr(classAddr)
 	classMask := classFlags & rubyTMask
 
 	switch classMask {
-	case rubyTClass:
-		realClassAddr = classAddr
+	case rubyTClass, rubyTModule:
+		classpathPtr = r.rm.Ptr(classAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath))
 
 		// Should also check if it is a singleton
 		// https://github.com/ruby/ruby/blob/b627532/vm_backtrace.c#L1934-L1937
@@ -769,13 +772,12 @@ func (r *rubyInstance) readClassName(classAddr libpf.Address) (libpf.String, err
 
 		if klassAddr := r.rm.Ptr(classAddr + RBASIC_KCLASS_OFFSET); klassAddr != 0 {
 			log.Debugf("Using klass for iclass type")
-			realClassAddr = klassAddr
+			classpathPtr = r.rm.Ptr(klassAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath))
 		}
 	default:
 		return libpf.NullString, fmt.Errorf("object at 0x%08X is not a handled class (mask: %08X)", classAddr, classMask)
 	}
 
-	classpathPtr := r.rm.Ptr(realClassAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath))
 	if classpathPtr != 0 {
 		classPath, err = r.getStringCached(classpathPtr, r.readRubyString)
 		if err != nil {
