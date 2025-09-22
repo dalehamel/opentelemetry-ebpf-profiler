@@ -89,8 +89,12 @@ const (
 	VM_ENV_DATA_INDEX_SPECVAL = 1 * 8
 	VM_ENV_FLAG_LOCAL         = 0x02
 
-	RUBY_FL_USER1  = 8192
+	// https://github.com/ruby/ruby/blob/1d1529629ce1550fad19c2d9410c4bf4995230d2/include/ruby/internal/fl_type.h#L158
 	RUBY_FL_USHIFT = 12
+	// https://github.com/ruby/ruby/blob/1d1529629ce1550fad19c2d9410c4bf4995230d2/include/ruby/internal/fl_type.h#L323-L324
+	RUBY_FL_USER1  = 1 << (RUBY_FL_USHIFT + 1)
+	// https://github.com/ruby/ruby/blob/1d1529629ce1550fad19c2d9410c4bf4995230d2/include/ruby/internal/fl_type.h#L394
+	RUBY_FL_SINGLETON = RUBY_FL_USER1
 	IMEMO_MASK     = 0x0f
 	IMEMO_CREF     = 1 /*!< class reference */
 	IMEMO_SVAR     = 2 /*!< special variable */
@@ -209,7 +213,7 @@ type rubyData struct {
 		}
 
 		rb_classext_struct struct {
-			classpath uint8
+			classpath, as_singleton_class_attached_object uint8
 		}
 
 		rb_method_definition_struct struct {
@@ -748,13 +752,18 @@ func (r *rubyInstance) readClassName(classAddr libpf.Address) (libpf.String, err
 	classMask := classFlags & rubyTMask
 
 	switch classMask {
-	case rubyTClass, rubyTModule:
+	case rubyTClass:
 		classpathPtr = r.rm.Ptr(classAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath))
 
 		// Should also check if it is a singleton
 		// https://github.com/ruby/ruby/blob/b627532/vm_backtrace.c#L1934-L1937
 		// https://github.com/ruby/ruby/blob/b627532/internal/class.h#L528
 
+		if classFlags & RUBY_FL_SINGLETON != 0 {
+			log.Debugf("Got singleton class")
+			singletonObject := r.rm.Ptr(classAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.as_singleton_class_attached_object))
+			classpathPtr = r.rm.Ptr(singletonObject + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath))
+		}
 		// If it is neither a class nor a module, we should handle what i guess is an anonymous class?
 		// https://github.com/ruby/ruby/blob/b627532/vm_backtrace.c#L1936-L1937 (see rb_class2name)
 
@@ -1442,6 +1451,7 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 			vms.rb_method_entry_struct.owner = 32
 
 			vms.rclass_and_rb_classext_t.classext = 32
+			vms.rb_classext_struct.as_singleton_class_attached_object = 96
 			vms.rb_classext_struct.classpath = 120
 
 			vms.rb_method_definition_struct.method_type = 0

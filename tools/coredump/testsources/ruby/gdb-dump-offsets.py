@@ -80,6 +80,7 @@ fields = {
 
     'rclass_and_rb_classext_t.classext': offset_of('RClass_and_rb_classext_t', 'classext'),
     'rb_classext_struct.classpath': offset_of('rb_classext_struct', 'classpath'),
+    'rb_classext_struct.as.singleton_class.attached_object': offset_of('rb_classext_struct', 'as.singleton_class.attached_object'),
 
     'rb_method_definition_struct.method_type': offset_of('rb_method_definition_struct', 'type'),
     'rb_method_definition_struct.body': offset_of('rb_method_definition_struct', 'body'),
