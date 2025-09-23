@@ -360,7 +360,8 @@ static inline EBPF_INLINE ErrorCode _push(Trace *trace, u64 file, u64 line, u8 f
 }
 
 // Push the file ID, line number and frame type into FrameList
-static inline EBPF_INLINE ErrorCode _push_with_extra(Trace *trace, u64 file, u64 line, u64 extra_addr, u8 frame_type)
+static inline EBPF_INLINE ErrorCode
+_push_with_extra(Trace *trace, u64 file, u64 line, u64 extra_addr, u8 frame_type)
 {
   if (trace->stack_len >= MAX_NON_ERROR_FRAME_UNWINDS) {
     DEBUG_PRINT("unable to push frame: stack is full");
@@ -375,20 +376,19 @@ static inline EBPF_INLINE ErrorCode _push_with_extra(Trace *trace, u64 file, u64
   trace->stack_len++;
   return __push_frame(__cgo_ctx->id, file, line, frame_type, return_address);
 #else
-	// Utilize the fact that an address is typically actually 48 bits, to store
+  // Utilize the fact that an address is typically actually 48 bits, to store
   // an additional address
-	u64 extra = (u64)extra_addr & 0x0000FFFFFFFFFFFFULL;
-	Frame frame = {
-    .file_id        = file,
-    .addr_or_line   = line,
-    .kind           = frame_type,
+  u64 extra   = (u64)extra_addr & 0x0000FFFFFFFFFFFFULL;
+  Frame frame = {
+    .file_id      = file,
+    .addr_or_line = line,
+    .kind         = frame_type,
   };
-	__builtin_memcpy(frame.pad, &extra, 6);
+  __builtin_memcpy(frame.pad, &extra, 6);
   trace->frames[trace->stack_len++] = frame;
 
   return ERR_OK;
 #endif
-
 }
 
 // Push a critical error frame.
@@ -563,6 +563,8 @@ static inline EBPF_INLINE void tail_call(void *ctx, int next)
   }
 
   if (record->tailCalls >= 29) {
+    Trace *trace = &record->trace;
+    DEBUG_PRINT("tracemgmt: exceeded max tail calls, stack size is %u", trace->stack_len);
     // The maximum tail call count we need to support on older kernels is 32. At this point
     // there is a chance that continuing unwinding the stack would further increase the number of
     // tail calls. As a result we might lose the unwound stack as no further tail calls are left
