@@ -820,13 +820,14 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, lib
 	vms := &r.r.vmStructs
 	log.Debugf("Got Ruby CME frame %X", cmeAddr)
 
-	vmMethodTypeIseq := uint32(0)  // VM_METHOD_TYPE_ISEQ = 0
-	vmMethodTypeCfunc := uint32(1) // VM_METHOD_TYPE_CFUNC = 1
+	vmMethodTypeIseq := uint8(0)  // VM_METHOD_TYPE_ISEQ = 0
+	vmMethodTypeCfunc := uint8(1) // VM_METHOD_TYPE_CFUNC = 1
 	methodDefinition := r.rm.Ptr(cmeAddr + libpf.Address(vms.rb_method_entry_struct.def))
 	log.Debugf("Method def %x", methodDefinition)
 
-	// TODO verify size is 4
-	methodType := r.rm.Uint32(methodDefinition + libpf.Address(vms.rb_method_definition_struct.method_type))
+	// NOTE - it is stored in a bitfield of size 4, so we must mask with 0xF
+	// https://github.com/ruby/ruby/blob/5e817f98af9024f34a3491c0aa6526d1191f8c11/method.h#L188
+	methodType := r.rm.Uint8(methodDefinition+libpf.Address(vms.rb_method_definition_struct.method_type)) & 0xF
 	log.Debugf("Method type %x", methodType)
 
 	switch methodType {
