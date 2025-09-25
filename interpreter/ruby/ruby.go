@@ -1203,9 +1203,16 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		sourceLine = iseq.line
 	}
 
+	// TODO we need to duplicate the exact logic of
+	// rb_profile_frame_full_label
 	if classPath != libpf.NullString {
 		// TODO we should properly use a `.` not `#` if it is a singleton class
-		methodName = libpf.Intern(fmt.Sprintf("%s#%s", classPath, methodName))
+
+		// FIXME - this is a hack to prevent appending the class when we have a block
+		// figure out why this is actually happening
+		if !strings.HasPrefix(methodName.String(), "block") {
+			methodName = libpf.Intern(fmt.Sprintf("%s#%s", classPath, methodName))
+		}
 	}
 
 	// Ruby doesn't provide the information about the function offset for the
