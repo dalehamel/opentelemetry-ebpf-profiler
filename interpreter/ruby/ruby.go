@@ -894,9 +894,9 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, lib
 			serial = originalId >> RUBY_ID_SCOPE_SHIFT
 		}
 
-		lastId := r.rm.Uint64(r.r.globalSymbolsAddr)
+		lastId := r.rm.Uint32(r.r.globalSymbolsAddr)
 
-		if serial > lastId {
+		if serial > uint64(lastId) {
 			return libpf.NullString, libpf.NullString, iseqBody, fmt.Errorf("invalid serial %d, greater than last id %d", serial, lastId)
 		}
 
