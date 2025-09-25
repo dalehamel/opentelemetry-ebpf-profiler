@@ -25,8 +25,11 @@ import (
 	"go.opentelemetry.io/ebpf-profiler/libpf"
 	"go.opentelemetry.io/ebpf-profiler/libpf/hash"
 	"go.opentelemetry.io/ebpf-profiler/libpf/pfelf"
+	"go.opentelemetry.io/ebpf-profiler/lpm"
 	"go.opentelemetry.io/ebpf-profiler/metrics"
+	"go.opentelemetry.io/ebpf-profiler/process"
 	"go.opentelemetry.io/ebpf-profiler/remotememory"
+	"go.opentelemetry.io/ebpf-profiler/reporter"
 	"go.opentelemetry.io/ebpf-profiler/successfailurecounter"
 	"go.opentelemetry.io/ebpf-profiler/support"
 	"go.opentelemetry.io/ebpf-profiler/util"
@@ -92,13 +95,13 @@ const (
 	// https://github.com/ruby/ruby/blob/1d1529629ce1550fad19c2d9410c4bf4995230d2/include/ruby/internal/fl_type.h#L158
 	RUBY_FL_USHIFT = 12
 	// https://github.com/ruby/ruby/blob/1d1529629ce1550fad19c2d9410c4bf4995230d2/include/ruby/internal/fl_type.h#L323-L324
-	RUBY_FL_USER1  = 1 << (RUBY_FL_USHIFT + 1)
+	RUBY_FL_USER1 = 1 << (RUBY_FL_USHIFT + 1)
 	// https://github.com/ruby/ruby/blob/1d1529629ce1550fad19c2d9410c4bf4995230d2/include/ruby/internal/fl_type.h#L394
 	RUBY_FL_SINGLETON = RUBY_FL_USER1
-	IMEMO_MASK     = 0x0f
-	IMEMO_CREF     = 1 /*!< class reference */
-	IMEMO_SVAR     = 2 /*!< special variable */
-	IMEMO_MENT     = 6
+	IMEMO_MASK        = 0x0f
+	IMEMO_CREF        = 1 /*!< class reference */
+	IMEMO_SVAR        = 2 /*!< special variable */
+	IMEMO_MENT        = 6
 )
 
 var (
@@ -319,6 +322,8 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 		rm:                   rm,
 		iseqBodyPCToFunction: iseqBodyPCToFunction,
 		addrToString:         addrToString,
+		mappings:             make(map[process.Mapping]*uint32),
+		prefixes:             make(map[lpm.Prefix]*uint32),
 		memPool: sync.Pool{
 			New: func() any {
 				buf := make([]byte, 512)
@@ -379,6 +384,13 @@ type rubyInstance struct {
 	// maxSize is the largest number we did see in the last reporting interval for size
 	// in getRubyLineNo.
 	maxSize atomic.Uint32
+
+	// mappings is indexed by the Mapping to its generation
+	mappings map[process.Mapping]*uint32
+	// prefixes is indexed by the prefix added to ebpf maps (to be cleaned up) to its generation
+	prefixes map[lpm.Prefix]*uint32
+	// mappingGeneration is the current generation (so old entries can be pruned)
+	mappingGeneration uint32
 }
 
 func (r *rubyInstance) Detach(ebpf interpreter.EbpfHandler, pid libpf.PID) error {
@@ -759,7 +771,7 @@ func (r *rubyInstance) readClassName(classAddr libpf.Address) (libpf.String, err
 		// https://github.com/ruby/ruby/blob/b627532/vm_backtrace.c#L1934-L1937
 		// https://github.com/ruby/ruby/blob/b627532/internal/class.h#L528
 
-		if classFlags & RUBY_FL_SINGLETON != 0 {
+		if classFlags&RUBY_FL_SINGLETON != 0 {
 			log.Debugf("Got singleton class")
 			singletonObject := r.rm.Ptr(classAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.as_singleton_class_attached_object))
 			classpathPtr = r.rm.Ptr(singletonObject + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath))
@@ -999,6 +1011,67 @@ func (r *rubyInstance) checkCmeFrame(cfp libpf.Address) (libpf.Address, error) {
 	}
 
 	return r.checkMethodEntry(envMeCref, true)
+}
+
+func (r *rubyInstance) SynchronizeMappings(ebpf interpreter.EbpfHandler,
+	_ reporter.SymbolReporter, pr process.Process, mappings []process.Mapping) error {
+	log.Debugf("Synchronizing ruby mappings")
+	pid := pr.PID()
+	r.mappingGeneration++
+	for idx := range mappings {
+		m := &mappings[idx]
+		if !m.IsExecutable() || !m.IsAnonymous() {
+			continue
+		}
+
+		if _, exists := r.mappings[*m]; exists {
+			*r.mappings[*m] = r.mappingGeneration
+			continue
+		}
+
+		// Generate a new uint32 pointer which is shared for mapping and the prefixes it owns
+		// so updating the mapping above will reflect to prefixes also.
+		mappingGeneration := r.mappingGeneration
+		r.mappings[*m] = &mappingGeneration
+
+		// Just assume all anonymous and executable mappings are V8 for now
+		log.Debugf("Enabling Ruby interpreter for %#x/%#x", m.Vaddr, m.Length)
+
+		prefixes, err := lpm.CalculatePrefixList(m.Vaddr, m.Vaddr+m.Length)
+		if err != nil {
+			return fmt.Errorf("new anonymous mapping lpm failure %#x/%#x", m.Vaddr, m.Length)
+		}
+
+		for _, prefix := range prefixes {
+			_, exists := r.prefixes[prefix]
+			if !exists {
+				err := ebpf.UpdatePidInterpreterMapping(pid, prefix, support.ProgUnwindV8, 0, 0)
+				if err != nil {
+					return err
+				}
+			}
+			r.prefixes[prefix] = &mappingGeneration
+		}
+	}
+
+	// Remove prefixes not seen
+	for prefix, generationPtr := range r.prefixes {
+		if *generationPtr == r.mappingGeneration {
+			continue
+		}
+		log.Debugf("Delete Ruby prefix %#v", prefix)
+		_ = ebpf.DeletePidInterpreterMapping(pid, prefix)
+		delete(r.prefixes, prefix)
+	}
+	for m, generationPtr := range r.mappings {
+		if *generationPtr == r.mappingGeneration {
+			continue
+		}
+		log.Debugf("Disabling Ruby for %#x/%#x", m.Vaddr, m.Length)
+		delete(r.mappings, m)
+	}
+
+	return nil
 }
 
 func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error {
