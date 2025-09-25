@@ -30,7 +30,7 @@ type JSONError struct {
 	Obsolete    bool   `json:"obsolete,omitempty"`
 }
 
-//go:embed errors.json
+//go:embed errors/errors.json
 var errorsJSON []byte
 
 // BPFCodeGen generates a BPF C header file.

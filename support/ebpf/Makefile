@@ -59,7 +59,7 @@ amd64:
 arm64:
 	$(MAKE) TARGET_ARCH=arm64
 
-errors.h: ../../tools/errors-codegen/errors.json
+errors.h: ../../tools/errors-codegen/errors/errors.json
 	go run ../../tools/errors-codegen/main.go bpf $@
 
 %.ebpf.$(TARGET_ARCH).o: %.ebpf.c errors.h

@@ -6,6 +6,7 @@ package processmanager // import "go.opentelemetry.io/ebpf-profiler/processmanag
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -26,6 +27,7 @@ import (
 	eim "go.opentelemetry.io/ebpf-profiler/processmanager/execinfomanager"
 	"go.opentelemetry.io/ebpf-profiler/reporter"
 	"go.opentelemetry.io/ebpf-profiler/times"
+	errorCodes "go.opentelemetry.io/ebpf-profiler/tools/errors-codegen/errors"
 	"go.opentelemetry.io/ebpf-profiler/tracer/types"
 	"go.opentelemetry.io/ebpf-profiler/traceutil"
 	"go.opentelemetry.io/ebpf-profiler/util"
@@ -58,6 +60,25 @@ var (
 	// errPIDGone indicates that a process is no longer managed by the process manager.
 	errPIDGone = errors.New("interpreter process gone")
 )
+
+func generateErrorMap() (map[libpf.AddressOrLineno]libpf.String, error) {
+	type JSONError struct {
+		ID   uint64 `json:"id"`
+		Name string `json:"name"`
+	}
+
+	var errors []JSONError
+	if err := json.Unmarshal(errorCodes.Errors, &errors); err != nil {
+		return nil, fmt.Errorf("failed to parse errors.json: %w", err)
+	}
+
+	out := make(map[libpf.AddressOrLineno]libpf.String, len(errors))
+	for _, item := range errors {
+		out[libpf.AddressOrLineno(item.ID)] = libpf.Intern(fmt.Sprintf("unwind_error: %s", item.Name))
+	}
+
+	return out, nil
+}
 
 // New creates a new ProcessManager which is responsible for keeping track of loading
 // and unloading of symbols for processes.
@@ -104,6 +125,14 @@ func New(ctx context.Context, includeTracers types.IncludedTracers, monitorInter
 		metricsAddSlice:          metrics.AddSlice,
 		filterErrorFrames:        filterErrorFrames,
 		includeEnvVars:           includeEnvVars,
+	}
+
+	errMap, err := generateErrorMap()
+
+	if err == nil {
+		pm.errMap = errMap
+	} else {
+		log.Errorf("Failed to set error map %v", err)
 	}
 
 	collectInterpreterMetrics(ctx, pm, monitorInterval)
@@ -229,7 +258,15 @@ func (pm *ProcessManager) ConvertTrace(trace *host.Trace) (newTrace *libpf.Trace
 
 		if frame.Type.IsError() {
 			if !pm.filterErrorFrames {
-				newTrace.AppendFrame(frame.Type, libpf.UnsymbolizedFileID, frame.Lineno)
+				if errName, ok := pm.errMap[frame.Lineno]; !ok {
+					newTrace.AppendFrame(frame.Type, libpf.UnsymbolizedFileID, frame.Lineno)
+				} else {
+					newTrace.Frames.Append(&libpf.Frame{
+						Type:            frame.Type,
+						FunctionName:    errName,
+						AddressOrLineno: frame.Lineno,
+					})
+				}
 			}
 			continue
 		}

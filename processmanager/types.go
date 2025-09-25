@@ -100,6 +100,9 @@ type ProcessManager struct {
 
 	// includeEnvVars holds a list of env vars that should be captured from processes
 	includeEnvVars libpf.Set[string]
+
+	// A mapping of error ids to string error
+	errMap map[libpf.AddressOrLineno]libpf.String
 }
 
 // Mapping represents an executable memory mapping of a process.
