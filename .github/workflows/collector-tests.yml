@@ -1,9 +1,6 @@
 name: Collector Tests
 on:
   workflow_dispatch:
-  schedule:
-    # Run every day at 3:15 AM.
-    - cron: '15 3 * * *'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
