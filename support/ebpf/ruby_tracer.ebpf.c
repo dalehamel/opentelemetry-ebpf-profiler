@@ -187,6 +187,14 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
         goto skip;
       }
 
+      // TODO we should actually be able to symbolize these c frames now that we are sending the CFP
+      // just unwind them, don't enter the native unwinder
+      ErrorCode error = push_ruby_cfp(trace, (u64)stack_ptr, 0, 0);
+      if (error) {
+        DEBUG_PRINT("ruby: failed to push cframe");
+        return error;
+      }
+
       stack_ptr += rubyinfo->size_of_control_frame_struct;
       *next_unwinder = PROG_UNWIND_NATIVE;
       goto save_state;

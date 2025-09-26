@@ -986,6 +986,7 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, lib
 		originalId := r.rm.Uint64(methodDefinition + libpf.Address(vms.rb_method_definition_struct.original_id))
 
 		cfuncName, err = r.id2str(originalId)
+		log.Debugf("Got cfunc name %s", cfuncName)
 		return classPath, cfuncName, libpf.Intern("<cfunc>"), singleton, iseqBody, nil
 
 	default:
