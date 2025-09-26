@@ -788,7 +788,7 @@ func (r *rubyInstance) readClassName(classAddr libpf.Address) (libpf.String, boo
 	classMask := classFlags & rubyTMask
 
 	switch classMask {
-	case rubyTClass:
+	case rubyTClass, rubyTModule:
 		classpathPtr = r.rm.Ptr(classAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath))
 
 		// Should also check if it is a singleton
@@ -892,6 +892,7 @@ func (r *rubyInstance) id2str(originalId uint64) (libpf.String, error) {
 
 	// Handle embedded arrays
 	if (flags & RARRAY_EMBED_FLAG) > 0 {
+		log.Debugf("Handling embedded array with shift")
 		// It is embedded, so just get the offset of as.ary
 		idsPtr = r.rm.Ptr(ids + libpf.Address(vms.rarray_struct.as_ary))
 
@@ -914,6 +915,7 @@ func (r *rubyInstance) id2str(originalId uint64) (libpf.String, error) {
 
 	flags = r.rm.Ptr(arrayPtr)
 	if (flags & RARRAY_EMBED_FLAG) > 0 {
+		log.Debugf("Handling embedded array (2 levels) with shift")
 		arrayPtr = r.rm.Ptr(array + libpf.Address(vms.rarray_struct.as_ary))
 	}
 	offset := (serial % 512) * 2
