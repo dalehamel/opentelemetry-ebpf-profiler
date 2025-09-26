@@ -891,6 +891,7 @@ func (r *rubyInstance) id2str(originalId uint64) (libpf.String, error) {
 	var idsLen uint64
 
 	// Handle embedded arrays
+	// https://github.com/ruby/ruby/blob/8836f26efa7a6deb0ef8b3f253d8d53d04d43152/include/ruby/internal/core/rarray.h#L297-L307
 	if (flags & RARRAY_EMBED_FLAG) > 0 {
 		log.Debugf("Handling embedded array with shift")
 		// It is embedded, so just get the offset of as.ary
@@ -913,7 +914,7 @@ func (r *rubyInstance) id2str(originalId uint64) (libpf.String, error) {
 	array := r.rm.Ptr(idsPtr + libpf.Address(idx*8)) // TODO don't hardcode 8 here, we just need the word size though
 	arrayPtr := r.rm.Ptr(array + libpf.Address(vms.rarray_struct.as_heap_ptr))
 
-	flags = r.rm.Ptr(arrayPtr)
+	flags = r.rm.Ptr(array)
 	if (flags & RARRAY_EMBED_FLAG) > 0 {
 		log.Debugf("Handling embedded array (2 levels) with shift")
 		arrayPtr = r.rm.Ptr(array + libpf.Address(vms.rarray_struct.as_ary))
