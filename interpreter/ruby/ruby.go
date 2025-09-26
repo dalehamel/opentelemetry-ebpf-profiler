@@ -272,8 +272,6 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 		}
 	}
 
-	r.globalSymbolsAddr += bias
-
 	cdata := support.RubyProcInfo{
 		Version: r.version,
 
@@ -317,9 +315,13 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 		return nil, err
 	}
 
+	
+	log.Debugf("Bias is 0x%08x, global_symbols are 0x%08x, relocated xs 0x%08x", bias, r.globalSymbolsAddr, bias + r.globalSymbolsAddr)
+
 	return &rubyInstance{
 		r:                    r,
 		rm:                   rm,
+		globalSymbolsAddr:    r.globalSymbolsAddr + bias,
 		iseqBodyPCToFunction: iseqBodyPCToFunction,
 		addrToString:         addrToString,
 		mappings:             make(map[process.Mapping]*uint32),
@@ -371,6 +373,7 @@ type rubyInstance struct {
 	r  *rubyData
 	rm remotememory.RemoteMemory
 
+	globalSymbolsAddr libpf.Address
 	// iseqBodyPCToFunction maps an address and Ruby VM program counter combination to extracted
 	// information from a Ruby instruction sequence object.
 	iseqBodyPCToFunction *freelru.LRU[rubyIseqBodyPC, *rubyIseq]
@@ -894,13 +897,13 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, lib
 			serial = originalId >> RUBY_ID_SCOPE_SHIFT
 		}
 
-		lastId := r.rm.Uint32(r.r.globalSymbolsAddr)
+		lastId := r.rm.Uint32(r.globalSymbolsAddr)
 
 		if serial > uint64(lastId) {
 			return libpf.NullString, libpf.NullString, iseqBody, fmt.Errorf("invalid serial %d, greater than last id %d", serial, lastId)
 		}
 
-		ids := r.rm.Ptr(r.r.globalSymbolsAddr + libpf.Address(IDS_OFFSET))
+		ids := r.rm.Ptr(r.globalSymbolsAddr + libpf.Address(IDS_OFFSET))
 
 		//struct RArray {
 		//        struct RBasic              basic __attribute__((__aligned__(8))); /*     0    16 */
