@@ -1,5 +1,6 @@
 // This file contains the code and map definitions for the Ruby tracer
 
+#include "ruby_tracer.h"
 #include "bpfdefs.h"
 #include "tracemgmt.h"
 #include "tsd.h"
@@ -18,19 +19,51 @@ bpf_map_def SEC("maps") ruby_procs = {
 // we start running out of instructions in the walk_ruby_stack program, one
 // option is to adjust this number downwards.
 // NOTE the maximum size stack is this times 33
-#define FRAMES_PER_WALK_RUBY_STACK 96
+#define FRAMES_PER_WALK_RUBY_STACK 64
 
-// Ruby VM frame flags are internal indicators for the VM interpreter to
-// treat frames in a dedicated way.
-// https://github.com/ruby/ruby/blob/5741ae379b2037ad5968b6994309e1d25cda6e1a/vm_core.h#L1208
-#define RUBY_FRAME_FLAG_BMETHOD 0x0040
-#define RUBY_FRAME_FLAG_LAMBDA  0x0100
+#define VM_ENV_FLAG_LOCAL 0x2
+#define RUBY_FL_USHIFT    12
+#define IMEMO_MASK        0x0f
+#define IMEMO_MENT        6
 
 // Record a Ruby cfp frame
-static EBPF_INLINE ErrorCode push_ruby_cfp(Trace *trace, u64 file, u64 line, u64 iseq_body)
+static EBPF_INLINE ErrorCode
+push_ruby_extra(Trace *trace, u8 frame_type, u64 file, u64 line, u64 iseq_addr)
 {
-  return _push_with_extra(trace, file, line, iseq_body, FRAME_MARKER_RUBY);
+  if (frame_type != ADDR_TYPE_NONE) {
+    // Ensure address is actually no more than 48-bits
+    u64 addr = file & ADDR_MASK_48_BIT;
+    if (addr != file) {
+      DEBUG_PRINT("ruby: error pushing extra addr, file data was more than 48 bits");
+    } else {
+      // Shift data to bits 48-55
+      u64 packed = addr | ((u64)frame_type << 48);
+      file       = packed;
+    }
+  }
+  // DEBUG_PRINT("%llx", iseq_addr);
+  return _push_with_extra(trace, file, line, iseq_addr, FRAME_MARKER_RUBY);
+  // return _push(trace, file, line, FRAME_MARKER_RUBY);
 }
+
+typedef struct rb_control_frame_struct {
+  const void *pc;         // cfp[0]
+  void *sp;               // cfp[1]
+  const void *iseq;       // cfp[2]
+  void *self;             // cfp[3] / block[0]
+  const void *ep;         // cfp[4] / block[1]
+  const void *block_code; // cfp[5] / block[2] -- iseq, ifunc, or forwarded block handler
+  void *jit_return;       // cfp[6] -- return address for JIT code
+} rb_control_frame_t;
+
+// #define VM_ENV_DATA_INDEX_ME_CREF    (-2) /* ep[-2] */
+// #define VM_ENV_DATA_INDEX_SPECVAL    (-1) /* ep[-1] */
+// #define VM_ENV_DATA_INDEX_FLAGS      ( 0) /* ep[ 0] */
+typedef struct vm_env_struct {
+  const void *me_cref;
+  const void *specval;
+  const void *flags;
+} vm_env_t;
 
 // walk_ruby_stack processes a Ruby VM stack, extracts information from the individual frames and
 // pushes this information to user space for symbolization of these frames.
@@ -130,29 +163,39 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
     }
   }
 
+  u64 frame_addr;
+  u8 frame_type;
   // iseq_addr holds the address to a rb_iseq_struct struct
-  void *iseq_addr;
+  u64 iseq_addr;
   // iseq_body points to a rb_iseq_constant_body struct
-  void *iseq_body;
+  // void *iseq_body;
   // pc stores the Ruby VM program counter information
   u64 pc;
   // iseq_encoded holds the instruction address and operands of a particular instruction sequence
   // The format of this element is documented in:
   // https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L328-L348
-  u64 iseq_encoded;
-  // iseq_size holds the size in bytes of a particular instruction sequence
-  u32 iseq_size;
-  s64 n;
+  // u64 iseq_encoded;
+  //// iseq_size holds the size in bytes of a particular instruction sequence
+  // u32 iseq_size;
+  // s64 n;
+
+  rb_control_frame_t control_frame;
+  vm_env_t vm_env;
 
   // If we entered native unwinding because we saw a cfunc frame, lets push that
   // frame now so it can take "ownership" of the native code that was unwound
-  if (record->rubyUnwindState.cfunc_saved_cfp != 0) {
-    ErrorCode error = push_ruby_cfp(trace, (u64)record->rubyUnwindState.cfunc_saved_cfp, 0, 0);
+  if (record->rubyUnwindState.cfunc_saved_frame != 0) {
+    ErrorCode error = push_ruby_extra(
+      trace,
+      record->rubyUnwindState.cfunc_saved_frame_type,
+      record->rubyUnwindState.cfunc_saved_frame,
+      0,
+      0);
     if (error) {
       DEBUG_PRINT("ruby: failed to push cframe");
       return error;
     }
-    record->rubyUnwindState.cfunc_saved_cfp = 0;
+    record->rubyUnwindState.cfunc_saved_frame = 0;
   }
 
   if (record->rubyUnwindState.last_pushed_frame == stack_ptr) {
@@ -160,16 +203,60 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
     stack_ptr += rubyinfo->size_of_control_frame_struct;
   }
 
+  // should be at offset 0 on the struct, and size of VALUE, so u64 should fit it
+  u64 rbasic_flags = 0;
+
   UNROLL for (u32 i = 0; i < FRAMES_PER_WALK_RUBY_STACK; ++i)
   {
     pc        = 0;
-    iseq_addr = NULL;
+    iseq_addr = 0;
 
-    bpf_probe_read_user(&iseq_addr, sizeof(iseq_addr), (void *)(stack_ptr + rubyinfo->iseq));
-    bpf_probe_read_user(&pc, sizeof(pc), (void *)(stack_ptr + rubyinfo->pc));
-    // If iseq or pc is 0, then this frame represents a registered hook.
-    // https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm.c#L1960
-    if (pc == 0 || iseq_addr == NULL) {
+    // TODO guards here
+    bpf_probe_read_user(&control_frame, sizeof(rb_control_frame_t), (void *)(stack_ptr));
+
+    if (bpf_probe_read_user(
+          &vm_env, sizeof(vm_env), (void *)(control_frame.ep - sizeof(vm_env) + sizeof(void *)))) {
+      DEBUG_PRINT("ruby: failed to get vm env");
+      increment_metric(metricID_UnwindRubyErrReadEp);
+      return ERR_RUBY_READ_EP;
+    }
+
+    // TODO maybe unroll this
+    if (!((u64)vm_env.flags & VM_ENV_FLAG_LOCAL)) {
+      if (bpf_probe_read_user(
+            &vm_env,
+            sizeof(vm_env),
+            (void *)(control_frame.ep - sizeof(vm_env) + sizeof(void *)))) {
+        DEBUG_PRINT("ruby: failed to get vm env");
+        increment_metric(metricID_UnwindRubyErrReadEp);
+        return ERR_RUBY_READ_EP;
+      }
+    }
+
+    frame_addr = (u64)vm_env.specval;
+    frame_type = ADDR_TYPE_EP;
+
+    if ((u64)vm_env.flags & VM_ENV_FLAG_LOCAL) {
+      DEBUG_PRINT("ruby: checking %llx", (u64)vm_env.me_cref);
+      if (bpf_probe_read_user(&rbasic_flags, sizeof(rbasic_flags), (void *)(vm_env.me_cref))) {
+        DEBUG_PRINT("ruby: failed to read flags to check method entry %llx", (u64)vm_env.me_cref);
+        return -1;
+      }
+
+      if (((rbasic_flags >> RUBY_FL_USHIFT) & IMEMO_MASK) == IMEMO_MENT) {
+        DEBUG_PRINT("ruby: imemo type is method entry");
+        frame_addr = (u64)vm_env.me_cref;
+        frame_type = ADDR_TYPE_CME;
+      }
+    }
+
+    iseq_addr = (u64)control_frame.iseq;
+    pc        = (u64)control_frame.pc;
+    // bpf_probe_read_user(&iseq_addr, sizeof(iseq_addr), (void *)(stack_ptr + rubyinfo->iseq));
+    // bpf_probe_read_user(&pc, sizeof(pc), (void *)(stack_ptr + rubyinfo->pc));
+    //  If iseq or pc is 0, then this frame represents a registered hook.
+    //  https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm.c#L1960
+    if (pc == 0 || iseq_addr == 0) {
       // Ruby frames without a PC or iseq are special frames and do not hold information
       // we can use further on. So we either skip them or ask the native unwinder to continue.
 
@@ -183,26 +270,20 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
         goto skip;
       }
 
-      u64 ep = 0;
-      if (bpf_probe_read_user(&ep, sizeof(ep), (void *)(stack_ptr + rubyinfo->ep))) {
-        DEBUG_PRINT("ruby: failed to get ep");
-        increment_metric(metricID_UnwindRubyErrReadEp);
-        return ERR_RUBY_READ_EP;
-      }
-
-      // TODO see if we can drop this check and just push these
-      if (
-        (ep & (RUBY_FRAME_FLAG_LAMBDA | RUBY_FRAME_FLAG_BMETHOD)) ==
-        (RUBY_FRAME_FLAG_LAMBDA | RUBY_FRAME_FLAG_BMETHOD)) {
-        // When identifying Ruby lambda blocks at this point, we do not want to return to the
-        // native unwinder. So we just skip this Ruby VM frame.
-        goto skip;
-      }
+      //// TODO see if we can drop this check and just push these
+      // if (
+      //   (ep & (RUBY_FRAME_FLAG_LAMBDA | RUBY_FRAME_FLAG_BMETHOD)) ==
+      //   (RUBY_FRAME_FLAG_LAMBDA | RUBY_FRAME_FLAG_BMETHOD)) {
+      //   // When identifying Ruby lambda blocks at this point, we do not want to return to the
+      //   // native unwinder. So we just skip this Ruby VM frame.
+      //   goto skip;
+      // }
 
       // We save this cfp on in the "Record" entry, and when we start the unwinder
       // again we'll push it so that the order is correct and the cfunc "owns" any native code we
       // unwound
-      record->rubyUnwindState.cfunc_saved_cfp = stack_ptr;
+      record->rubyUnwindState.cfunc_saved_frame      = frame_addr;
+      record->rubyUnwindState.cfunc_saved_frame_type = frame_type;
 
       // Advance the ruby stack pointer so we will start at the next frame
       stack_ptr += rubyinfo->size_of_control_frame_struct;
@@ -210,46 +291,15 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
       goto save_state;
     }
 
-    if (bpf_probe_read_user(&iseq_body, sizeof(iseq_body), (void *)(iseq_addr + rubyinfo->body))) {
-      DEBUG_PRINT("ruby: failed to get iseq body");
-      increment_metric(metricID_UnwindRubyErrReadIseqBody);
-      return ERR_RUBY_READ_ISEQ_BODY;
-    }
-
-    if (bpf_probe_read_user(
-          &iseq_encoded, sizeof(iseq_encoded), (void *)(iseq_body + rubyinfo->iseq_encoded))) {
-      DEBUG_PRINT("ruby: failed to get iseq encoded");
-      increment_metric(metricID_UnwindRubyErrReadIseqEncoded);
-      return ERR_RUBY_READ_ISEQ_ENCODED;
-    }
-
-    if (bpf_probe_read_user(
-          &iseq_size, sizeof(iseq_size), (void *)(iseq_body + rubyinfo->iseq_size))) {
-      DEBUG_PRINT("ruby: failed to get iseq size");
-      increment_metric(metricID_UnwindRubyErrReadIseqSize);
-      return ERR_RUBY_READ_ISEQ_SIZE;
-    }
-
-    // To get the line number iseq_encoded is subtracted from pc. This result also represents the
-    // size of the current instruction sequence. If the calculated size of the instruction sequence
-    // is greater than the value in iseq_encoded we don't report this pc to user space.
-    //
-    // https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_backtrace.c#L47-L48
-    n = (pc - iseq_encoded) / rubyinfo->size_of_value;
-    if (n > iseq_size || n < 0) {
-      DEBUG_PRINT("ruby: skipping invalid instruction sequence");
-      goto skip;
-    }
-
     // For symbolization of the frame we forward the information about the instruction sequence
     // and program counter to user space.
     // From this we can then extract information like file or function name and line number.
-    ErrorCode error = push_ruby_cfp(trace, (u64)stack_ptr, pc, (u64)iseq_body);
+    ErrorCode error = push_ruby_extra(trace, frame_type, frame_addr, pc, iseq_addr);
     if (error) {
       DEBUG_PRINT("ruby: failed to push frame");
       return error;
     }
-    DEBUG_PRINT("ruby: pushed a ruby frame at 0x%llx", (u64)stack_ptr);
+    DEBUG_PRINT("ruby: pushed a ruby frame (%d) at 0x%llx", frame_type, frame_addr);
     record->rubyUnwindState.last_pushed_frame = stack_ptr;
     increment_metric(metricID_UnwindRubyFrames);
 

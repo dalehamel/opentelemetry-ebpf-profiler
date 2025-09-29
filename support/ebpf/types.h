@@ -673,8 +673,10 @@ typedef struct RubyUnwindState {
   void *last_pushed_frame;
   // Pointer to the last control frame struct in the Ruby VM stack we want to handle.
   void *last_stack_frame;
-  // CFP for last cfunc before we switched to native unwinder
-  void *cfunc_saved_cfp;
+  // Framefor last cfunc before we switched to native unwinder
+  u64 cfunc_saved_frame;
+  // Is it a CME (fully processed) or EP (more processing needed)
+  u8 cfunc_saved_frame_type;
 } RubyUnwindState;
 
 // Container for additional scratch space needed by the HotSpot unwinder.
