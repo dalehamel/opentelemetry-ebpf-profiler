@@ -462,6 +462,7 @@ static inline EBPF_INLINE ErrorCode resolve_unwind_mapping(PerCPURecord *record,
     state->error_metric = metricID_UnwindNativeErrWrongTextSection;
     return ERR_NATIVE_NO_PID_PAGE_MAPPING;
   }
+  DEBUG_PRINT("PC: %llx", state->pc);
 
   decode_bias_and_unwind_program(val->bias_and_unwind_program, &state->text_section_bias, unwinder);
   state->text_section_id     = val->file_id;
