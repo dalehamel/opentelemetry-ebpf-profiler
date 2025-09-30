@@ -259,40 +259,40 @@ read_ep:
   // bpf_probe_read_user(&pc, sizeof(pc), (void *)(stack_ptr + rubyinfo->pc));
   //  If iseq or pc is 0, then this frame represents a registered hook.
   //  https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm.c#L1960
-  if (pc == 0 || iseq_addr == 0) {
-    // Ruby frames without a PC or iseq are special frames and do not hold information
-    // we can use further on. So we either skip them or ask the native unwinder to continue.
+  //if (pc == 0 || iseq_addr == 0) {
+  //  // Ruby frames without a PC or iseq are special frames and do not hold information
+  //  // we can use further on. So we either skip them or ask the native unwinder to continue.
 
-    if (rubyinfo->version < 0x20600) {
-      // With Ruby version 2.6 the scope of our entry symbol ruby_current_execution_context_ptr
-      // got extended. We need this extension to jump back unwinding Ruby VM frames if we
-      // continue at this point with unwinding native frames.
-      // As this is not available for Ruby versions < 2.6 we just skip this indicator frame and
-      // continue unwinding Ruby VM frames. Due to this issue, the ordering of Ruby and native
-      // frames might not be correct for Ruby versions < 2.6.
-      goto skip;
-    }
+  //  if (rubyinfo->version < 0x20600) {
+  //    // With Ruby version 2.6 the scope of our entry symbol ruby_current_execution_context_ptr
+  //    // got extended. We need this extension to jump back unwinding Ruby VM frames if we
+  //    // continue at this point with unwinding native frames.
+  //    // As this is not available for Ruby versions < 2.6 we just skip this indicator frame and
+  //    // continue unwinding Ruby VM frames. Due to this issue, the ordering of Ruby and native
+  //    // frames might not be correct for Ruby versions < 2.6.
+  //    goto skip;
+  //  }
 
-    //// TODO see if we can drop this check and just push these
-    // if (
-    //   (ep & (RUBY_FRAME_FLAG_LAMBDA | RUBY_FRAME_FLAG_BMETHOD)) ==
-    //   (RUBY_FRAME_FLAG_LAMBDA | RUBY_FRAME_FLAG_BMETHOD)) {
-    //   // When identifying Ruby lambda blocks at this point, we do not want to return to the
-    //   // native unwinder. So we just skip this Ruby VM frame.
-    //   goto skip;
-    // }
+  //  //// TODO see if we can drop this check and just push these
+  //  // if (
+  //  //   (ep & (RUBY_FRAME_FLAG_LAMBDA | RUBY_FRAME_FLAG_BMETHOD)) ==
+  //  //   (RUBY_FRAME_FLAG_LAMBDA | RUBY_FRAME_FLAG_BMETHOD)) {
+  //  //   // When identifying Ruby lambda blocks at this point, we do not want to return to the
+  //  //   // native unwinder. So we just skip this Ruby VM frame.
+  //  //   goto skip;
+  //  // }
 
-    // We save this cfp on in the "Record" entry, and when we start the unwinder
-    // again we'll push it so that the order is correct and the cfunc "owns" any native code we
-    // unwound
-    record->rubyUnwindState.cfunc_saved_frame      = frame_addr;
-    record->rubyUnwindState.cfunc_saved_frame_type = frame_type;
+  //  // We save this cfp on in the "Record" entry, and when we start the unwinder
+  //  // again we'll push it so that the order is correct and the cfunc "owns" any native code we
+  //  // unwound
+  //  record->rubyUnwindState.cfunc_saved_frame      = frame_addr;
+  //  record->rubyUnwindState.cfunc_saved_frame_type = frame_type;
 
-    // Advance the ruby stack pointer so we will start at the next frame
-    stack_ptr += rubyinfo->size_of_control_frame_struct;
-    *next_unwinder = PROG_UNWIND_NATIVE;
-    goto save_state;
-  }
+  //  // Advance the ruby stack pointer so we will start at the next frame
+  //  stack_ptr += rubyinfo->size_of_control_frame_struct;
+  //  *next_unwinder = PROG_UNWIND_NATIVE;
+  //  goto save_state;
+  //}
 
   // For symbolization of the frame we forward the information about the instruction sequence
   // and program counter to user space.
@@ -310,8 +310,8 @@ skip:
   if (last_stack_frame <= stack_ptr) {
     DEBUG_PRINT("ruby: bottomed out the stack at 0x%llx", (u64)stack_ptr);
     // We have processed all frames in the Ruby VM and can stop here.
-    *next_unwinder = PROG_UNWIND_NATIVE;
-    //*next_unwinder = PROG_UNWIND_STOP;
+    //*next_unwinder = PROG_UNWIND_NATIVE;
+    *next_unwinder = PROG_UNWIND_STOP;
     goto save_state;
   }
   stack_ptr += rubyinfo->size_of_control_frame_struct;
