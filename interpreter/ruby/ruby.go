@@ -948,9 +948,16 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, fallback libpf.Add
 	methodDefinition := r.rm.Ptr(cmeAddr + libpf.Address(vms.rb_method_entry_struct.def))
 	log.Debugf("Method def %x", methodDefinition)
 
+	// We do a direct read, as a value of 0 would be mistaken for ISEQ type
+	var buf [1]byte
+	if r.rm.Read(methodDefinition+libpf.Address(vms.rb_method_definition_struct.method_type), buf[:]) != nil {
+		log.Errorf("Unable to read method type")
+		return libpf.NullString, libpf.NullString, libpf.NullString, false, iseqBody, fmt.Errorf("unable to read method type")
+	}
+
 	// NOTE - it is stored in a bitfield of size 4, so we must mask with 0xF
 	// https://github.com/ruby/ruby/blob/5e817f98af9024f34a3491c0aa6526d1191f8c11/method.h#L188
-	methodType := r.rm.Uint8(methodDefinition+libpf.Address(vms.rb_method_definition_struct.method_type)) & 0xF
+  methodType := buf[0] & 0xF
 	log.Debugf("Method type %x", methodType)
 
 	switch methodType {
@@ -965,7 +972,7 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, fallback libpf.Add
 		methodBody := r.rm.Ptr(methodDefinition + libpf.Address(vms.rb_method_definition_struct.body))
 		if methodBody == 0 {
 			log.Errorf("method body was empty, using fallback for iseqbody")
-			return libpf.NullString, libpf.NullString, libpf.NullString, false, fallback, fmt.Errorf("unable to read method body")
+			return libpf.NullString, libpf.NullString, libpf.NullString, false, fallback, fmt.Errorf("unable to read method body, classpath: %s", classPath.String())
 		}
 
 		iseqBody = r.rm.Ptr(methodBody + libpf.Address(vms.rb_method_iseq_struct.iseqptr+vms.iseq_struct.body))
@@ -974,6 +981,7 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, fallback libpf.Add
 			log.Errorf("iseq body was empty")
 			return libpf.NullString, libpf.NullString, libpf.NullString, false, iseqBody, fmt.Errorf("unable to read iseq body")
 		}
+		log.Debugf("Read CME successfully %s %08x", classPath.String(), iseqBody)
 	case vmMethodTypeCfunc:
 		var cfuncName libpf.String
 		classDefinition := r.rm.Ptr(cmeAddr + libpf.Address(vms.rb_method_entry_struct.owner))
