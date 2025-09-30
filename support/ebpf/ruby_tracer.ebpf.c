@@ -19,7 +19,7 @@ bpf_map_def SEC("maps") ruby_procs = {
 // we start running out of instructions in the walk_ruby_stack program, one
 // option is to adjust this number downwards.
 // NOTE the maximum size stack is this times 33
-#define FRAMES_PER_WALK_RUBY_STACK 32
+#define FRAMES_PER_WALK_RUBY_STACK 128
 
 #define VM_METHOD_TYPE_ISEQ  0
 #define VM_METHOD_TYPE_CFUNC  1
@@ -245,7 +245,6 @@ read_ep:
   // TODO this ends up being super expensive in terms of verifier insn
   // see if we can handle this case more elegantly
   if (!final_iteration && ((u64)vm_env.flags & VM_ENV_FLAG_LOCAL)){
-    final_iteration = true;
     can_be_svar = 1;
   }
 check_me:
@@ -271,6 +270,7 @@ check_me:
     goto done_check;
   case IMEMO_SVAR:
     if (can_be_svar) {
+      final_iteration = true;
       u64 svar_cref = 0;
       if (bpf_probe_read_user(&svar_cref, sizeof(svar_cref), (void *)(me_or_cref + 8))) {
         DEBUG_PRINT("ruby: failed to dereference svar %llx", (u64)me_or_cref);
@@ -286,7 +286,7 @@ check_me:
         return -1;
       }
     }
-    return -1;
+    goto done_check;
   default:
     goto done_check;
   }
