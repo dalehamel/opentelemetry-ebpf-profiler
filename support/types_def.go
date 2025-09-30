@@ -193,9 +193,9 @@ const (
 	RubyAddrMask48Bit     = C.ADDR_MASK_48_BIT
 	RubyExtraAddrTypeMask = C.EXTRA_TYPE_MASK
 
-	RubyExtraAddrTypeNone = C.ADDR_TYPE_NONE
-	RubyExtraAddrTypeCME  = C.ADDR_TYPE_CME
-	RubyExtraAddrTypeEP   = C.ADDR_TYPE_EP
+	RubyExtraAddrTypeNone = C.FRAME_TYPE_NONE
+	RubyExtraAddrTypeCME  = C.FRAME_TYPE_CME
+	RubyExtraAddrTypeISEQ = C.FRAME_TYPE_ISEQ
 )
 
 var MetricsTranslation = []metrics.MetricID{

@@ -371,7 +371,7 @@ const (
 
 	RubyExtraAddrTypeNone = 0x0
 	RubyExtraAddrTypeCME  = 0x1
-	RubyExtraAddrTypeEP   = 0x2
+	RubyExtraAddrTypeISEQ = 0x2
 )
 
 var MetricsTranslation = []metrics.MetricID{
