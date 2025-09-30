@@ -21,6 +21,9 @@ bpf_map_def SEC("maps") ruby_procs = {
 // NOTE the maximum size stack is this times 33
 #define FRAMES_PER_WALK_RUBY_STACK 192
 
+#define VM_METHOD_TYPE_ISEQ  0
+#define VM_METHOD_TYPE_CFUNC  1
+
 #define VM_ENV_FLAG_LOCAL 0x2
 #define RUBY_FL_USHIFT    12
 #define IMEMO_MASK        0x0f
@@ -251,8 +254,8 @@ check_me:
   switch ((rbasic_flags >> RUBY_FL_USHIFT) & IMEMO_MASK) {
   case IMEMO_MENT:
     DEBUG_PRINT("ruby: imemo type is method entry");
-    frame_addr = me_or_cref;
     frame_type = FRAME_TYPE_CME;
+    frame_addr = me_or_cref;
     goto done_check;
   case IMEMO_CREF:
     goto done_check;
@@ -273,6 +276,7 @@ check_me:
         return -1;
       }
     }
+    return -1;
   default:
     goto done_check;
   }
@@ -294,7 +298,31 @@ check_me:
 
 done_check:
 
-  // TODO if addr type is none, store the iseq addr instead and add a new type for this
+  if (frame_type == FRAME_TYPE_CME) {
+    //vms.rb_method_entry_struct.def = 16
+    u8 method_type = 0;
+
+    if (bpf_probe_read_user(&method_type, sizeof(method_type), (void *)(frame_addr) + (16 * sizeof(void*)))) {
+      DEBUG_PRINT("ruby: failed to method type %llx", frame_addr);
+      // TODO have a named error for this
+      return -1;
+    }
+
+    // It is a 4 bit bitfield
+    method_type &= 0xF;
+    DEBUG_PRINT("ruby: METHOD TYPE MASK %d", method_type);
+
+    // If it is iseq or cfunc, pass it though. Anything else we'll use frame type iseq
+    switch (method_type) {
+    case VM_METHOD_TYPE_ISEQ:
+      break;
+    case VM_METHOD_TYPE_CFUNC:
+      break;
+    default:
+      frame_type = FRAME_TYPE_NONE;
+    }
+  }
+
   if (frame_type == FRAME_TYPE_NONE) {
     frame_type = FRAME_TYPE_ISEQ;
     frame_addr = (u64)control_frame.iseq;
