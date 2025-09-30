@@ -1188,45 +1188,24 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		if !ok {
 			lineNo, err := r.getRubyLineNo(iseqBody, uint64(pc))
 			if err != nil {
-				if iseqBody != iseqBodyAddr {
-					// Last ditch effort to get something usable
-					iseqBody = iseqBodyAddr
-					lineNo, err = r.getRubyLineNo(iseqBody, uint64(pc))
-				}
-				if err != nil {
-					lineNo = 0
-					log.Warnf("RubySymbolizer: Failed to get line number %v", err)
-				}
+				lineNo = 0
+				log.Warnf("RubySymbolizer: Failed to get line number %v", err)
 			}
 
 			sourceFileNamePtr := r.rm.Ptr(iseqBody +
 				libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.pathobj))
 			sourceFileName, err := r.getStringCached(sourceFileNamePtr, r.readPathObjRealPath)
 			if err != nil {
-				if iseqBody != iseqBodyAddr {
-					// Last ditch effort to get something usable
-					iseqBody = iseqBodyAddr
-					sourceFileName, err = r.getStringCached(sourceFileNamePtr, r.readPathObjRealPath)
-				}
-				if err != nil {
-					sourceFileName = libpf.Intern("UNKNOWN_FILE")
-					log.Warnf("RubySymbolizer: Failed to get source file name %v", err)
-				}
+				sourceFileName = libpf.Intern("UNKNOWN_FILE")
+				log.Warnf("RubySymbolizer: Failed to get source file name %v", err)
 			}
 
 			funcNamePtr := r.rm.Ptr(iseqBody +
 				libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.label))
 			functionName, err := r.getStringCached(funcNamePtr, r.readRubyString)
 			if err != nil {
-				if iseqBody != iseqBodyAddr {
-					// Last ditch effort to get something usable
-					iseqBody = iseqBodyAddr
-					functionName, err = r.getStringCached(funcNamePtr, r.readRubyString)
-				}
-				if err != nil {
-					functionName = libpf.Intern("UNKNOWN_FUNCTION")
-					log.Warnf("RubySymbolizer: Failed to get source function name (iseq@0x%08x) %v", iseqBody, err)
-				}
+				functionName = libpf.Intern("UNKNOWN_FUNCTION")
+				log.Warnf("RubySymbolizer: Failed to get source function name (iseq@0x%08x) %v", iseqBody, err)
 			}
 
 			iseq = &rubyIseq{
