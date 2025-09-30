@@ -205,15 +205,19 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
 
   // should be at offset 0 on the struct, and size of VALUE, so u64 should fit it
   u64 rbasic_flags = 0;
-
-  UNROLL for (u32 i = 0; i < FRAMES_PER_WALK_RUBY_STACK; ++i)
-  {
+  const u64 max_ep_check = 1;
+  u64 ep_check = 0;
+  u32 i = 0;
+  //UNROLL for (u32 i = 0; i < FRAMES_PER_WALK_RUBY_STACK; ++i)
+  //{
+read_cfp:
     pc        = 0;
     iseq_addr = 0;
 
     // TODO guards here
     bpf_probe_read_user(&control_frame, sizeof(rb_control_frame_t), (void *)(stack_ptr));
 
+read_ep:
     if (bpf_probe_read_user(
           &vm_env, sizeof(vm_env), (void *)(control_frame.ep - sizeof(vm_env) + sizeof(void *)))) {
       DEBUG_PRINT("ruby: failed to get vm env");
@@ -222,15 +226,9 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
     }
 
     // TODO maybe unroll this
-    if (!((u64)vm_env.flags & VM_ENV_FLAG_LOCAL)) {
-      if (bpf_probe_read_user(
-            &vm_env,
-            sizeof(vm_env),
-            (void *)(control_frame.ep - sizeof(vm_env) + sizeof(void *)))) {
-        DEBUG_PRINT("ruby: failed to get vm env");
-        increment_metric(metricID_UnwindRubyErrReadEp);
-        return ERR_RUBY_READ_EP;
-      }
+    if (ep_check < max_ep_check && (!((u64)vm_env.flags & VM_ENV_FLAG_LOCAL))){
+      ep_check += 1;
+      goto read_ep;
     }
 
     frame_addr = (u64)vm_env.specval;
@@ -311,7 +309,10 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
       goto save_state;
     }
     stack_ptr += rubyinfo->size_of_control_frame_struct;
-  }
+    i += 1;
+    if (i < FRAMES_PER_WALK_RUBY_STACK)
+      goto read_cfp;
+  //}
   *next_unwinder = PROG_UNWIND_RUBY;
 
 save_state:
