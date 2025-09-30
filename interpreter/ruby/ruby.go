@@ -1053,6 +1053,15 @@ func (r *rubyInstance) SynchronizeMappings(ebpf interpreter.EbpfHandler,
 		if !m.IsExecutable() || !m.IsAnonymous() {
 			continue
 		}
+		if strings.Contains(m.Path.String(), "jit_reserve_addr_space") {
+			mStart := m.Vaddr
+			interpRanges := []util.Range{util.Range{Start: mStart, End: mStart + m.Length}}
+			if err := ebpf.UpdateInterpreterOffsets(support.ProgUnwindRuby, 0x1,
+				interpRanges); err != nil {
+				return err
+			}
+			log.Debugf("Added jit mapping %v to interpreter ranges, %v", m, interpRanges)
+		}
 
 		if _, exists := r.mappings[*m]; exists {
 			*r.mappings[*m] = r.mappingGeneration
@@ -1064,7 +1073,7 @@ func (r *rubyInstance) SynchronizeMappings(ebpf interpreter.EbpfHandler,
 		mappingGeneration := r.mappingGeneration
 		r.mappings[*m] = &mappingGeneration
 
-		// Just assume all anonymous and executable mappings are V8 for now
+		// Just assume all anonymous and executable mappings are Ruby for now
 		log.Debugf("Enabling Ruby interpreter for %#x/%#x", m.Vaddr, m.Length)
 
 		prefixes, err := lpm.CalculatePrefixList(m.Vaddr, m.Vaddr+m.Length)
@@ -1075,7 +1084,7 @@ func (r *rubyInstance) SynchronizeMappings(ebpf interpreter.EbpfHandler,
 		for _, prefix := range prefixes {
 			_, exists := r.prefixes[prefix]
 			if !exists {
-				err := ebpf.UpdatePidInterpreterMapping(pid, prefix, support.ProgUnwindV8, 0, 0)
+				err := ebpf.UpdatePidInterpreterMapping(pid, prefix, support.ProgUnwindRuby, 0, 0)
 				if err != nil {
 					return err
 				}
