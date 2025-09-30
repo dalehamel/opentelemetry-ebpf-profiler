@@ -964,8 +964,9 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, fallback libpf.Add
 
 		methodBody := r.rm.Ptr(methodDefinition + libpf.Address(vms.rb_method_definition_struct.body))
 		if methodBody == 0 {
-			log.Errorf("method body was empty")
-			return libpf.NullString, libpf.NullString, libpf.NullString, false, fallback, fmt.Errorf("unable to read method body")
+			log.Errorf("method body was empty, using fallback")
+			//return libpf.NullString, libpf.NullString, libpf.NullString, false, fallback, fmt.Errorf("unable to read method body")
+			methodBody = fallback
 		}
 
 		iseqBody = r.rm.Ptr(methodBody + libpf.Address(vms.rb_method_iseq_struct.iseqptr+vms.iseq_struct.body))

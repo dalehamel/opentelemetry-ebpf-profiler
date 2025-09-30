@@ -334,19 +334,19 @@ done_check:
       goto iseq_frame;
     }
 
-    void * method_body;
-    if (bpf_probe_read_user(&method_body, sizeof(method_body), (void *)(method_def + 8))) {
-      DEBUG_PRINT("ruby: failed to method body %llx", (u64) method_def);
-      // TODO have a named error for this
-      return -1;
-    }
-    void * iseq_body;
-    if (bpf_probe_read_user(&iseq_body, sizeof(iseq_body), (void *)(method_body + 0 + 16))) {
-      DEBUG_PRINT("ruby: failed to method body %llx", (u64) method_def);
-      // TODO have a named error for this
-      return -1;
-    }
-    extra_addr = (u64) iseq_body; 
+    //void * method_body;
+    //if (bpf_probe_read_user(&method_body, sizeof(method_body), (void *)(method_def + 8))) {
+    //  DEBUG_PRINT("ruby: failed to method body %llx", (u64) method_def);
+    //  // TODO have a named error for this
+    //  return -1;
+    //}
+    //void * iseq_body;
+    //if (bpf_probe_read_user(&iseq_body, sizeof(iseq_body), (void *)(method_body + 0 + 16))) {
+    //  DEBUG_PRINT("ruby: failed to method body %llx", (u64) method_def);
+    //  // TODO have a named error for this
+    //  return -1;
+    //}
+    extra_addr = (u64)control_frame.iseq; 
   }
 
 iseq_frame:
