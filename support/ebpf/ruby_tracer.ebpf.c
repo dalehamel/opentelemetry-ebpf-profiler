@@ -174,6 +174,7 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
     }
   }
 
+  u64 extra_addr;
   u64 frame_addr;
   u8 frame_type;
   // iseq_addr holds the address to a rb_iseq_struct struct
@@ -305,24 +306,22 @@ done_check:
   if (frame_type == FRAME_TYPE_CME) {
     //vms.rb_method_entry_struct.def = 16
     u8 method_type = 0;
-    void* method_type_ptr;
-    if (bpf_probe_read_user(&method_type_ptr, sizeof(method_type_ptr), (void *)(frame_addr + 16 ))) {
+    void* method_def;
+    if (bpf_probe_read_user(&method_def, sizeof(method_def), (void *)(frame_addr + 16 ))) {
       DEBUG_PRINT("ruby: failed to method type ptr %llx", frame_addr);
       // TODO have a named error for this
       return -1;
     }
 
-    if (bpf_probe_read_user(&method_type, sizeof(method_type), (void *)(method_type_ptr))) {
-      DEBUG_PRINT("ruby: failed to method type %llx", (u64) method_type_ptr);
+    if (bpf_probe_read_user(&method_type, sizeof(method_type), (void *)(method_def))) {
+      DEBUG_PRINT("ruby: failed to method type %llx", (u64) method_def);
       // TODO have a named error for this
       return -1;
     }
 
 
     // It is a 4 bit bitfield
-    DEBUG_PRINT("ruby: METHOD TYPE BEFORE %d", method_type);
     method_type &= 0xF;
-    DEBUG_PRINT("ruby: METHOD TYPE MASK %d", method_type);
 
     // If it is iseq or cfunc, pass it though. Anything else we'll use frame type iseq
     switch (method_type) {
@@ -332,9 +331,25 @@ done_check:
       break;
     default:
       frame_type = FRAME_TYPE_NONE;
+      goto iseq_frame;
     }
+
+    void * method_body;
+    if (bpf_probe_read_user(&method_body, sizeof(method_body), (void *)(method_def + 8))) {
+      DEBUG_PRINT("ruby: failed to method body %llx", (u64) method_def);
+      // TODO have a named error for this
+      return -1;
+    }
+    void * iseq_body;
+    if (bpf_probe_read_user(&iseq_body, sizeof(iseq_body), (void *)(method_body + 0 + 16))) {
+      DEBUG_PRINT("ruby: failed to method body %llx", (u64) method_def);
+      // TODO have a named error for this
+      return -1;
+    }
+    extra_addr = (u64) iseq_body; 
   }
 
+iseq_frame:
   if (frame_type == FRAME_TYPE_NONE) {
     if (control_frame.iseq == NULL) {
       DEBUG_PRINT("ruby: NULL iseq entry");
@@ -387,7 +402,7 @@ done_check:
   // For symbolization of the frame we forward the information about the instruction sequence
   // and program counter to user space.
   // From this we can then extract information like file or function name and line number.
-  ErrorCode error = push_ruby_extra(trace, frame_type, frame_addr, pc, 0);
+  ErrorCode error = push_ruby_extra(trace, frame_type, frame_addr, pc, extra_addr);
   if (error) {
     DEBUG_PRINT("ruby: failed to push frame");
     return error;

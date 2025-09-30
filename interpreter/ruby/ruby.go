@@ -930,7 +930,7 @@ func (r *rubyInstance) id2str(originalId uint64) (libpf.String, error) {
 	return symbolName, err
 }
 
-func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, libpf.String, libpf.String, bool, libpf.Address, error) {
+func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, fallback libpf.Address) (libpf.String, libpf.String, libpf.String, bool, libpf.Address, error) {
 	// Get the classpath, and figure out the iseq body offset from the definition
 	// so that we can get the name and line number as below
 
@@ -965,7 +965,7 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, lib
 		methodBody := r.rm.Ptr(methodDefinition + libpf.Address(vms.rb_method_definition_struct.body))
 		if methodBody == 0 {
 			log.Errorf("method body was empty")
-			return libpf.NullString, libpf.NullString, libpf.NullString, false, iseqBody, fmt.Errorf("unable to read method body")
+			return libpf.NullString, libpf.NullString, libpf.NullString, false, fallback, fmt.Errorf("unable to read method body")
 		}
 
 		iseqBody = r.rm.Ptr(methodBody + libpf.Address(vms.rb_method_iseq_struct.iseqptr+vms.iseq_struct.body))
@@ -994,53 +994,6 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, lib
 	}
 
 	return classPath, libpf.NullString, filename, singleton, iseqBody, nil
-}
-
-func (r *rubyInstance) checkMethodEntry(envMeCref libpf.Address, svarAllowed bool) (libpf.Address, error) {
-	if envMeCref == 0 {
-		return envMeCref, fmt.Errorf("not a candidate for CME, env_me_cref is nil")
-	}
-
-	rbasicFlags := r.rm.Ptr(envMeCref)
-	imemoType := (rbasicFlags >> RUBY_FL_USHIFT) & IMEMO_MASK
-
-	switch imemoType {
-	case IMEMO_MENT:
-		return envMeCref, nil
-	case IMEMO_CREF:
-		return envMeCref, fmt.Errorf("not a CME, is cref")
-	case IMEMO_SVAR:
-		if svarAllowed {
-			methodEntry := r.rm.Ptr(envMeCref + libpf.Address(r.r.vmStructs.size_of_value))
-			return r.checkMethodEntry(methodEntry, false)
-		}
-	}
-
-	return envMeCref, fmt.Errorf("unable to find a candidate CME")
-}
-
-func (r *rubyInstance) checkCmeFrame(ep libpf.Address) (libpf.Address, error) {
-
-	// TODO batch these reads into one contiguous one
-	envSpecval := r.rm.Ptr(ep - libpf.Address(VM_ENV_DATA_INDEX_SPECVAL))
-	envMeCref := r.rm.Ptr(ep - libpf.Address(VM_ENV_DATA_INDEX_ME_CREF))
-
-	checkEp := ep
-	flags := r.rm.Ptr(checkEp)
-
-	for flags&VM_ENV_FLAG_LOCAL != 0 {
-		methodEntry, err := r.checkMethodEntry(envMeCref, false)
-		if err != nil {
-			checkEp = envSpecval
-			envSpecval = r.rm.Ptr(ep - libpf.Address(VM_ENV_DATA_INDEX_SPECVAL))
-			envMeCref = r.rm.Ptr(ep - libpf.Address(VM_ENV_DATA_INDEX_ME_CREF))
-			flags = r.rm.Ptr(checkEp)
-		} else {
-			return methodEntry, nil
-		}
-	}
-
-	return r.checkMethodEntry(envMeCref, true)
 }
 
 func (r *rubyInstance) SynchronizeMappings(ebpf interpreter.EbpfHandler,
@@ -1138,7 +1091,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	case support.RubyExtraAddrTypeCME:
 		cme = frameAddr
 		log.Debugf("Got ruby CME at 0x%08x", cme)
-		classPath, methodName, sourceFile, singleton, iseqBody, err = r.processCmeFrame(cme)
+		classPath, methodName, sourceFile, singleton, iseqBody, err = r.processCmeFrame(cme, libpf.Address(frame.Extra))
 		if err != nil {
 			log.Errorf("Tried and failed to process as CME frame %v", err)
 		}
