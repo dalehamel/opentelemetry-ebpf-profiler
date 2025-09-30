@@ -19,7 +19,7 @@ bpf_map_def SEC("maps") ruby_procs = {
 // we start running out of instructions in the walk_ruby_stack program, one
 // option is to adjust this number downwards.
 // NOTE the maximum size stack is this times 33
-#define FRAMES_PER_WALK_RUBY_STACK 192
+#define FRAMES_PER_WALK_RUBY_STACK 32
 
 #define VM_METHOD_TYPE_ISEQ  0
 #define VM_METHOD_TYPE_CFUNC  1
@@ -220,6 +220,7 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
   u64 ep_check = 0;
   u32 i = 0;
   bool can_be_svar = 0;
+  bool final_iteration = false;
   //UNROLL for (u32 i = 0; i < FRAMES_PER_WALK_RUBY_STACK; ++i)
   //{
 read_cfp:
@@ -235,11 +236,20 @@ read_ep:
     increment_metric(metricID_UnwindRubyErrReadEp);
     return ERR_RUBY_READ_EP;
   }
+
   frame_addr = 0;
   frame_type = FRAME_TYPE_NONE;
 
   me_or_cref = (u64) vm_env.me_cref;
+
+  // TODO this ends up being super expensive in terms of verifier insn
+  // see if we can handle this case more elegantly
+  if (!final_iteration && ((u64)vm_env.flags & VM_ENV_FLAG_LOCAL)){
+    final_iteration = true;
+    can_be_svar = 1;
+  }
 check_me:
+
 
   DEBUG_PRINT("ruby: checking %llx", me_or_cref);
   if (me_or_cref == 0)
@@ -281,16 +291,10 @@ check_me:
     goto done_check;
   }
 
-  if (ep_check < max_ep_check && (!((u64)vm_env.flags & VM_ENV_FLAG_LOCAL))){
+  if (!final_iteration && ep_check < max_ep_check && (!((u64)vm_env.flags & VM_ENV_FLAG_LOCAL))){
     ep_check++;
     goto read_ep;
   } 
-
-  if (ep_check < max_ep_check && ((u64)vm_env.flags & VM_ENV_FLAG_LOCAL)){
-    ep_check++;
-    can_be_svar = 1;
-    goto read_ep;
-  }
 
   // TODO have a named error for this
   if (ep_check >= max_ep_check)
@@ -301,14 +305,22 @@ done_check:
   if (frame_type == FRAME_TYPE_CME) {
     //vms.rb_method_entry_struct.def = 16
     u8 method_type = 0;
-
-    if (bpf_probe_read_user(&method_type, sizeof(method_type), (void *)(frame_addr) + (16 * sizeof(void*)))) {
-      DEBUG_PRINT("ruby: failed to method type %llx", frame_addr);
+    void* method_type_ptr;
+    if (bpf_probe_read_user(&method_type_ptr, sizeof(method_type_ptr), (void *)(frame_addr + 16 ))) {
+      DEBUG_PRINT("ruby: failed to method type ptr %llx", frame_addr);
       // TODO have a named error for this
       return -1;
     }
 
+    if (bpf_probe_read_user(&method_type, sizeof(method_type), (void *)(method_type_ptr))) {
+      DEBUG_PRINT("ruby: failed to method type %llx", (u64) method_type_ptr);
+      // TODO have a named error for this
+      return -1;
+    }
+
+
     // It is a 4 bit bitfield
+    DEBUG_PRINT("ruby: METHOD TYPE BEFORE %d", method_type);
     method_type &= 0xF;
     DEBUG_PRINT("ruby: METHOD TYPE MASK %d", method_type);
 
@@ -324,6 +336,10 @@ done_check:
   }
 
   if (frame_type == FRAME_TYPE_NONE) {
+    if (control_frame.iseq == NULL) {
+      DEBUG_PRINT("ruby: NULL iseq entry");
+      return -1;
+    }
     frame_type = FRAME_TYPE_ISEQ;
     frame_addr = (u64)control_frame.iseq;
   }

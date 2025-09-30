@@ -1150,8 +1150,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	}
 
 	if err != nil {
-		log.Errorf("Unable to handle frame: %v", err)
-		log.Errorf("Couldn't handle frame (%d) 0x%08x (pc: 0x%08x) as %d frame", frameAddrType, frameAddr, frame.Lineno, frameAddrType)
+		log.Errorf("Couldn't handle frame (%d) 0x%08x (pc: 0x%08x) as %d frame %08x %v", frameAddrType, frameAddr, frame.Lineno, frameAddrType, iseqBody, err)
 	}
 
 	if methodName == libpf.NullString {
@@ -1165,10 +1164,6 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		}
 
 		iseq, ok := r.iseqBodyPCToFunction.Get(key)
-		if !ok {
-			key.addr = iseqBody
-			iseq, ok = r.iseqBodyPCToFunction.Get(key)
-		}
 		if !ok {
 			lineNo, err := r.getRubyLineNo(iseqBody, uint64(pc))
 			if err != nil {
