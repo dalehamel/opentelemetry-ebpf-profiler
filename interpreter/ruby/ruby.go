@@ -1026,7 +1026,7 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, lib
 	var err error
 
 	vms := &r.r.vmStructs
-	log.Debugf("Got Ruby CME frame %X", cmeAddr)
+	//log.Debugf("Got Ruby CME frame %X", cmeAddr)
 
 	vmMethodTypeIseq := uint8(0)  // VM_METHOD_TYPE_ISEQ = 0
 	vmMethodTypeCfunc := uint8(1) // VM_METHOD_TYPE_CFUNC = 1
@@ -1044,7 +1044,7 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, lib
 	// NOTE - it is stored in a bitfield of size 4, so we must mask with 0xF
 	// https://github.com/ruby/ruby/blob/5e817f98af9024f34a3491c0aa6526d1191f8c11/method.h#L188
 	methodType := buf[0] & 0xF
-	log.Debugf("Method type %x", methodType)
+	//log.Debugf("Method type %x", methodType)
 
 	switch methodType {
 	case vmMethodTypeIseq:
@@ -1067,7 +1067,7 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, lib
 			log.Errorf("iseq body was empty")
 			return libpf.NullString, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, fmt.Errorf("unable to read iseq body")
 		}
-		log.Debugf("Read CME successfully %s %08x", classPath.String(), iseqBody)
+		//log.Debugf("Read CME successfully %s %08x", classPath.String(), iseqBody)
 	case vmMethodTypeCfunc:
 		var cfuncName libpf.String
 		cframe = true
@@ -1194,20 +1194,20 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		_, ok := r.uniqueCmes[cme]
 		if !ok {
 			r.uniqueCmes[cme] = struct{}{}
-			log.Debugf("Unique CMEs %d", len(r.uniqueCmes))
+			//log.Debugf("Unique CMEs %d", len(r.uniqueCmes))
 		}
 		var cmeHit bool
 		cmeEntry, cmeHit = r.cmeCache.Get(cme)
 		if !cmeHit {
 			// TODO if the process is dead and we didn't get a hit, insert a special dummy frame
 			cmeEntry = &rubyCme{}
-			log.Debugf("Got ruby CME at 0x%08x", cme)
+			//log.Debugf("Got ruby CME at 0x%08x", cme)
 			classPath, methodName, sourceFile, singleton, cframe, iseqBody, err = r.processCmeFrame(cme)
 			if err != nil {
 				log.Errorf("Tried and failed to process as CME frame %v", err)
 			}
 		} else {
-			log.Debugf("Got CME cache hit! %d unique CMEs", len(r.uniqueCmes))
+			//log.Debugf("Got CME cache hit! %d unique CMEs", len(r.uniqueCmes))
 			classPath = cmeEntry.classPath
 			methodName = cmeEntry.methodName
 			sourceFile = cmeEntry.sourceFile

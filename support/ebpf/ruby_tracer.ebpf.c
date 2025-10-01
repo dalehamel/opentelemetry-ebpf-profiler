@@ -19,7 +19,7 @@ bpf_map_def SEC("maps") ruby_procs = {
 // we start running out of instructions in the walk_ruby_stack program, one
 // option is to adjust this number downwards.
 // NOTE the maximum size stack is this times 33
-#define FRAMES_PER_WALK_RUBY_STACK 64
+#define FRAMES_PER_WALK_RUBY_STACK 32
 
 #define VM_ENV_FLAG_LOCAL 0x2
 #define RUBY_FL_USHIFT    12
@@ -277,7 +277,7 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
   u64 me_or_cref         = 0;
   u64 svar_cref          = 0;
   void * current_ep = NULL;
-  const u64 max_ep_check = 5;
+  const u64 max_ep_check = 10;
   u64 ep_check           = 0;
   u32 i                  = 0;
   // UNROLL for (u32 i = 0; i < FRAMES_PER_WALK_RUBY_STACK; ++i)
@@ -321,10 +321,7 @@ check_me:
   if ((u64)vm_env.flags & VM_ENV_FLAG_LOCAL) {
     switch (imemo_mask) {
     case IMEMO_MENT:
-      DEBUG_PRINT("ruby: imemo type is method entry");
-      frame_type = FRAME_TYPE_CME;
-      frame_addr = me_or_cref;
-      goto done_check;
+      goto check_ment;
     case IMEMO_SVAR:
       if (bpf_probe_read_user(&svar_cref, sizeof(svar_cref), (void *)(me_or_cref + 8))) {
         DEBUG_PRINT("ruby: failed to dereference svar %llx", (u64)me_or_cref);
@@ -343,23 +340,17 @@ check_me:
         return ERR_RUBY_READ_ISEQ_SIZE;
       }
       imemo_mask = (rbasic_flags >> RUBY_FL_USHIFT) & IMEMO_MASK;
-      if (imemo_mask == IMEMO_MENT) {
-        DEBUG_PRINT("ruby: imemo type is method entry");
-        frame_type = FRAME_TYPE_CME;
-        frame_addr = me_or_cref;
-        goto done_check;
-      }
-      goto done_check;
+      goto check_ment;
     default:
       goto done_check;
     }
-  } else {
-    if (imemo_mask == IMEMO_MENT) {
-      DEBUG_PRINT("ruby: imemo type is method entry");
-      frame_type = FRAME_TYPE_CME;
-      frame_addr = me_or_cref;
-      goto done_check;
-    }
+  }
+check_ment:
+  if (imemo_mask == IMEMO_MENT) {
+    DEBUG_PRINT("ruby: imemo type is method entry");
+    frame_type = FRAME_TYPE_CME;
+    frame_addr = me_or_cref;
+    goto done_check;
   }
 
 next_ep:
@@ -373,8 +364,8 @@ next_ep:
   // TODO have a named error for this
   // TODO fallback to checking in userspace from EP pointer
   if (ep_check >= max_ep_check)
-    //return -1;
     return ERR_RUBY_READ_ISEQ_BODY;
+  //  //return -1;
 
 
 done_check:
