@@ -30,6 +30,13 @@ fields = {
     'execution_context_struct.vm_stack': offset_of('rb_execution_context_struct', 'vm_stack'),
     'execution_context_struct.vm_stack_size': offset_of('rb_execution_context_struct', 'vm_stack_size'),
     'execution_context_struct.cfp': offset_of('rb_execution_context_struct', 'cfp'),
+    'execution_context_struct.thread_ptr': offset_of('rb_execution_context_struct', 'thread_ptr'),
+
+    # For determining if we are in GC
+    'thread_struct.vm': offset_of('rb_thread_struct', 'vm'),
+    'vm_struct.gc_objspace': offset_of('rb_vm_struct', 'gc.objspace'),
+    'objspace.flags': offset_of('rb_objspace', 'flags'),
+    'objspace.size_of_flags': size_of_field('rb_objspace', 'flags'),
 
     'control_frame_struct.pc': offset_of('rb_control_frame_struct', 'pc'),
     'control_frame_struct.iseq': offset_of('rb_control_frame_struct', 'iseq'),

@@ -131,6 +131,12 @@ var (
 	// regex to extract a version from a string
 	rubyVersionRegex = regexp.MustCompile(`^(\d)\.(\d)\.(\d)$`)
 
+	rubyGcRunning    = libpf.Intern("GC_RUNNING")
+	rubyGcMarking    = libpf.Intern("GC_MARKING")
+	rubyGcSweeping   = libpf.Intern("GC_SWEEPING")
+	rubyGcCompacting = libpf.Intern("GC_COMPACTING")
+	rubyGcDummyFile  = libpf.Intern("gc.c")
+
 	// compiler check to make sure the needed interfaces are satisfied
 	_ interpreter.Data     = &rubyData{}
 	_ interpreter.Instance = &rubyInstance{}
@@ -155,7 +161,23 @@ type rubyData struct {
 		// rb_execution_context_struct
 		// https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L843
 		execution_context_struct struct {
-			vm_stack, vm_stack_size, cfp uint8
+			vm_stack, vm_stack_size, cfp, thread_ptr uint8
+		}
+
+		// https://github.com/ruby/ruby/blob/v3_4_5/vm_core.h#L1108
+		thread_struct struct {
+			vm uint8
+		}
+
+		// https://github.com/ruby/ruby/blob/v3_4_5/vm_core.h#L666
+		vm_struct struct {
+			gc_objspace uint16
+		}
+
+		// https://github.com/ruby/ruby/blob/v3_4_5/gc/default/default.c#L445
+		objspace struct {
+			flags         uint8
+			size_of_flags uint8
 		}
 
 		// rb_control_frame_struct
@@ -304,6 +326,13 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 		Vm_stack:      r.vmStructs.execution_context_struct.vm_stack,
 		Vm_stack_size: r.vmStructs.execution_context_struct.vm_stack_size,
 		Cfp:           r.vmStructs.execution_context_struct.cfp,
+		Thread_ptr:    r.vmStructs.execution_context_struct.thread_ptr,
+
+		Thread_vm:   r.vmStructs.thread_struct.vm,
+		Vm_objspace: r.vmStructs.vm_struct.gc_objspace,
+
+		Objspace_flags:         r.vmStructs.objspace.flags,
+		Objspace_size_of_flags: r.vmStructs.objspace.size_of_flags,
 
 		Pc:                           r.vmStructs.control_frame_struct.pc,
 		Iseq:                         r.vmStructs.control_frame_struct.iseq,
@@ -961,7 +990,7 @@ read_def:
 
 	// NOTE - it is stored in a bitfield of size 4, so we must mask with 0xF
 	// https://github.com/ruby/ruby/blob/5e817f98af9024f34a3491c0aa6526d1191f8c11/method.h#L188
-  methodType := buf[0] & 0xF
+	methodType := buf[0] & 0xF
 	log.Debugf("Method type %x", methodType)
 
 	switch methodType {
@@ -1100,16 +1129,38 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	frameAddrType := uint8(frame.File >> 48)
 
 	switch frameAddrType {
-	case support.RubyExtraAddrTypeCME:
+	case support.RubyFrameTypeCME:
 		cme = frameAddr
 		log.Debugf("Got ruby CME at 0x%08x", cme)
 		classPath, methodName, sourceFile, singleton, iseqBody, err = r.processCmeFrame(cme, libpf.Address(frame.Extra))
 		if err != nil {
 			log.Errorf("Tried and failed to process as CME frame %v", err)
 		}
-	case support.RubyExtraAddrTypeISEQ:
+	case support.RubyFrameTypeISEQ:
 		iseqAddr := libpf.Address(frameAddr)
 		iseqBody = r.rm.Ptr(iseqAddr + libpf.Address(vms.iseq_struct.body))
+	case support.RubyFrameTypeGC:
+		gcMode := frameAddr
+		var gcModeStr libpf.String
+		switch gcMode {
+		case support.RubyGcModeNone:
+			gcModeStr = rubyGcRunning
+		case support.RubyGcModeMarking:
+			gcModeStr = rubyGcMarking
+		case support.RubyGcModeSweeping:
+			gcModeStr = rubyGcSweeping
+		case support.RubyGcModeCompacting:
+			gcModeStr = rubyGcCompacting
+		}
+
+		// TODO append a second frame if we are marking, sweeping, or compacting, to nest on "gcModeRunning"?
+		frames.Append(&libpf.Frame{
+			Type:         libpf.RubyFrame,
+			FunctionName: gcModeStr,
+			SourceFile:   rubyGcDummyFile,
+			SourceLine:   0,
+		})
+		return nil
 	default:
 		err = fmt.Errorf("Unable to get CME or ISEQ from frame address")
 	}
@@ -1383,6 +1434,30 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 	vms.execution_context_struct.vm_stack = 0
 	vms.execution_context_struct.vm_stack_size = 8
 	vms.execution_context_struct.cfp = 16
+	vms.execution_context_struct.thread_ptr = 48
+
+	vms.thread_struct.vm = 32 // FIXME this is very ruby version dependent, ractor comes before it
+
+	// Package and sizes varies a lot for this rather large struct between two arches
+	if runtime.GOARCH == "amd64" {
+		// x86_64:
+		//        struct {
+		//                struct rb_objspace * objspace;           /*  1296     8 */
+		//                struct gc_mark_func_data_struct * mark_func_data; /*  1304     8 */
+		//        } gc;
+		vms.vm_struct.gc_objspace = 1296 // FIXME this is very ruby version dependent, ractor comes before it
+	} else {
+		// arm64:
+		//        struct {
+		//                struct rb_objspace * objspace;           /*  1320     8 */
+		//                struct gc_mark_func_data_struct * mark_func_data; /*  1328     8 */
+		//        } gc;                                            /*  1320    16 */
+
+		vms.vm_struct.gc_objspace = 1320 // FIXME this is very ruby version dependent, ractor comes before it
+	}
+
+	vms.objspace.flags = 20
+	vms.objspace.size_of_flags = 4
 
 	vms.control_frame_struct.pc = 0
 	vms.control_frame_struct.iseq = 16

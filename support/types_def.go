@@ -193,9 +193,15 @@ const (
 	RubyAddrMask48Bit     = C.ADDR_MASK_48_BIT
 	RubyExtraAddrTypeMask = C.EXTRA_TYPE_MASK
 
-	RubyExtraAddrTypeNone = C.FRAME_TYPE_NONE
-	RubyExtraAddrTypeCME  = C.FRAME_TYPE_CME
-	RubyExtraAddrTypeISEQ = C.FRAME_TYPE_ISEQ
+	RubyFrameTypeNone = C.FRAME_TYPE_NONE
+	RubyFrameTypeCME  = C.FRAME_TYPE_CME
+	RubyFrameTypeISEQ = C.FRAME_TYPE_ISEQ
+	RubyFrameTypeGC   = C.FRAME_TYPE_GC
+
+	RubyGcModeNone       = C.GC_MODE_NONE
+	RubyGcModeMarking    = C.GC_MODE_MARKING
+	RubyGcModeSweeping   = C.GC_MODE_SWEEPING
+	RubyGcModeCompacting = C.GC_MODE_COMPACTING
 )
 
 var MetricsTranslation = []metrics.MetricID{

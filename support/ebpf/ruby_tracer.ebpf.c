@@ -22,7 +22,7 @@ bpf_map_def SEC("maps") ruby_procs = {
 #define FRAMES_PER_WALK_RUBY_STACK 128
 
 #define VM_METHOD_TYPE_ISEQ  0
-#define VM_METHOD_TYPE_CFUNC  1
+#define VM_METHOD_TYPE_CFUNC 1
 
 #define VM_ENV_FLAG_LOCAL 0x2
 #define RUBY_FL_USHIFT    12
@@ -30,6 +30,10 @@ bpf_map_def SEC("maps") ruby_procs = {
 #define IMEMO_CREF        1
 #define IMEMO_SVAR        2
 #define IMEMO_MENT        6
+
+// https://github.com/ruby/ruby/blob/v3_4_5/gc/default/default.c#L459-L464
+#define GC_MODE_MASK 0x00000003 // bits 0-1 (2 bits for mode)
+#define GC_DURING_GC (1 << 5)   // bit 5
 
 // Record a Ruby cfp frame
 static EBPF_INLINE ErrorCode
@@ -69,6 +73,47 @@ typedef struct vm_env_struct {
   const void *specval;
   const void *flags;
 } vm_env_t;
+
+static EBPF_INLINE ErrorCode
+gc_check(const RubyProcInfo *rubyinfo, const void *current_ctx_addr, bool *is_gc, u8 *gc_mode)
+{
+  void *thread_ptr;
+  void *vm;
+  void *objspace;
+  u32 gc_flags;
+
+  if (bpf_probe_read_user(
+        &thread_ptr, sizeof(thread_ptr), (void *)(current_ctx_addr + rubyinfo->thread_ptr))) {
+    DEBUG_PRINT("failed to get current thread");
+    return -1;
+  }
+
+  if (bpf_probe_read_user(&vm, sizeof(vm), (void *)(thread_ptr + rubyinfo->thread_vm))) {
+    DEBUG_PRINT("failed to get current vm");
+    return -1;
+  }
+
+  if (bpf_probe_read_user(&objspace, sizeof(objspace), (void *)(vm + rubyinfo->vm_objspace))) {
+    DEBUG_PRINT("failed to get objspace handle");
+    return -1;
+  }
+
+  if (bpf_probe_read_user(
+        &gc_flags, sizeof(gc_flags), (void *)(objspace + rubyinfo->objspace_flags))) {
+    DEBUG_PRINT("failed to get objspace handle");
+    return -1;
+  }
+
+  // DEBUG_PRINT("GC: Got gc flags %x", gc_flags);
+
+  if (gc_flags & GC_DURING_GC) {
+    *is_gc   = true;
+    *gc_mode = (u8)gc_flags & GC_MODE_MASK;
+  } else {
+    *is_gc = false;
+  }
+  return 0;
+}
 
 // walk_ruby_stack processes a Ruby VM stack, extracts information from the individual frames and
 // pushes this information to user space for symbolization of these frames.
@@ -120,15 +165,31 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
     return ERR_OK;
   }
 
+  Trace *trace   = &record->trace;
+  *next_unwinder = PROG_UNWIND_STOP;
+
+  bool is_gc;
+  u8 gc_mode;
+  ErrorCode gc_error = gc_check(rubyinfo, current_ctx_addr, &is_gc, &gc_mode);
+  if (gc_error) {
+    return gc_error;
+  }
+
+  if (is_gc) {
+    // GC is active - skip profiling
+    DEBUG_PRINT("GC: is active, mode is %d", gc_mode);
+    ErrorCode error = push_ruby_extra(trace, FRAME_TYPE_GC, gc_mode, 0, 0);
+    if (error) {
+      return error;
+    }
+    return ERR_OK;
+  }
+
   // TODO check if the top frame is JIT, if so, either a dummy frame to indicate
   // jitt'd code was running, or encode this in the first top control frame we extract
   // from the on the ruby stack should as it is the iseq body that "owns" this jit
   // If this is the case, we can encode this in the "file" entry in a bitmask
   // and when we're symbolizing the function we can append "jit" to this.
-
-  Trace *trace = &record->trace;
-
-  *next_unwinder = PROG_UNWIND_STOP;
 
   // stack_ptr points to the frame of the Ruby VM call stack that will be unwound next
   void *stack_ptr        = record->rubyUnwindState.stack_ptr;
