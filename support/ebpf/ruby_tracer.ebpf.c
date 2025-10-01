@@ -364,7 +364,8 @@ check_me:
 
 next_ep:
   if (ep_check < max_ep_check && (!((u64)vm_env.flags & VM_ENV_FLAG_LOCAL))) {
-    current_ep = (void *) vm_env.specval;
+    // https://github.com/ruby/ruby/blob/v3_4_5/vm_core.h#L1355
+    current_ep = (void *)((u64)vm_env.specval & ~0x03);
     ep_check++;
     goto read_ep;
   }
