@@ -41,7 +41,7 @@ const (
 	// This should reflect the number of hot functions that are seen often in a trace.
 	iseqCacheSize = 1024
 	// cmeCacheSize
-	cmeCacheSize = 4096
+	cmeCacheSize = 8192
 	// addrToStringSize is the LRU size for caching Ruby VM addresses to Ruby strings.
 	addrToStringSize = 1024
 
@@ -380,7 +380,10 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 		r:                    r,
 		rm:                   rm,
 		globalSymbolsAddr:    r.globalSymbolsAddr + bias,
+		// TODO - we can probably just rely on the frame cache added in
+		// https://github.com/open-telemetry/opentelemetry-ebpf-profiler/commit/97be3669b0f0d66f52ff9d6d33cd482f4eddb6d6
 		cmeCache:             cmeCache,
+		uniqueCmes:           make(map[libpf.Address]struct{}),
 		iseqBodyPCToFunction: iseqBodyPCToFunction,
 		addrToString:         addrToString,
 		mappings:             make(map[process.Mapping]*uint32),
@@ -461,6 +464,9 @@ type rubyInstance struct {
 
 	// cmeCache maps a CME address to the symbolized info
 	cmeCache *freelru.LRU[libpf.Address, *rubyCme]
+
+	// Just for statistics, delete this later
+	uniqueCmes map[libpf.Address]struct{}
 
 	// addrToString maps an address to an extracted Ruby String from this address.
 	addrToString *freelru.LRU[libpf.Address, libpf.String]
@@ -1174,6 +1180,11 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	case support.RubyFrameTypeCME:
 		cme = frameAddr
 
+		_, ok := r.uniqueCmes[cme]
+		if !ok{
+			r.uniqueCmes[cme] = struct{}{}
+			log.Debugf("Unique CMEs %d", len(r.uniqueCmes))
+		}
 		var cmeHit bool
 		cmeEntry, cmeHit = r.cmeCache.Get(cme)
 		if !cmeHit {
@@ -1185,7 +1196,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 				log.Errorf("Tried and failed to process as CME frame %v", err)
 			}
 		} else {
-			log.Debugf("Got CME cache hit!")
+			log.Debugf("Got CME cache hit! %d unique CMEs", len(r.uniqueCmes))
 			classPath = cmeEntry.classPath
 			methodName = cmeEntry.methodName
 			sourceFile = cmeEntry.sourceFile
