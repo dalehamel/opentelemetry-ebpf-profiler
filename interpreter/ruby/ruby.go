@@ -959,6 +959,14 @@ func (r *rubyInstance) id2str(originalId uint64) (libpf.String, error) {
 	return symbolName, err
 }
 
+func (r *rubyInstance) PtrCheck(addr libpf.Address) (libpf.Address, error) {
+	var buf [8]byte
+	if err := r.rm.Read(addr, buf[:]); err != nil {
+		return 0, err
+	}
+	return libpf.Address(binary.LittleEndian.Uint64(buf[:])) - r.rm.Bias, nil
+}
+
 func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, libpf.String, libpf.String, bool, libpf.Address, error) {
 	// Get the classpath, and figure out the iseq body offset from the definition
 	// so that we can get the name and line number as below
@@ -974,8 +982,10 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, lib
 
 	vmMethodTypeIseq := uint8(0)  // VM_METHOD_TYPE_ISEQ = 0
 	vmMethodTypeCfunc := uint8(1) // VM_METHOD_TYPE_CFUNC = 1
-	methodDefinition := r.rm.Ptr(cmeAddr + libpf.Address(vms.rb_method_entry_struct.def))
-	log.Debugf("Method def %x", methodDefinition)
+	methodDefinition, err := r.PtrCheck(cmeAddr + libpf.Address(vms.rb_method_entry_struct.def))
+	if err != nil {
+		return libpf.NullString, libpf.NullString, libpf.NullString, false, iseqBody, fmt.Errorf("Unable to read method definition, CME (%08x) %v", cmeAddr, err)
+	}
 
 	// We do a direct read, as a value of 0 would be mistaken for ISEQ type
 	var buf [1]byte
