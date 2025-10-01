@@ -369,8 +369,10 @@ next_ep:
   }
 
   // TODO have a named error for this
+  // TODO fallback to checking in userspace from EP pointer
   if (ep_check >= max_ep_check)
-    return -1;
+    goto skip;
+    //return -1;
 
 
 done_check:
