@@ -19,7 +19,7 @@ bpf_map_def SEC("maps") ruby_procs = {
 // we start running out of instructions in the walk_ruby_stack program, one
 // option is to adjust this number downwards.
 // NOTE the maximum size stack is this times 33
-#define FRAMES_PER_WALK_RUBY_STACK 128
+#define FRAMES_PER_WALK_RUBY_STACK 64
 
 #define VM_METHOD_TYPE_ISEQ  0
 #define VM_METHOD_TYPE_CFUNC 1
@@ -277,12 +277,13 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
 
   // should be at offset 0 on the struct, and size of VALUE, so u64 should fit it
   u64 rbasic_flags       = 0;
+  u64 imemo_mask         = 0;
   u64 me_or_cref         = 0;
+  u64 svar_cref          = 0;
+  void * current_ep = NULL;
   const u64 max_ep_check = 5;
   u64 ep_check           = 0;
   u32 i                  = 0;
-  bool can_be_svar       = 0;
-  bool final_iteration   = false;
   // UNROLL for (u32 i = 0; i < FRAMES_PER_WALK_RUBY_STACK; ++i)
   //{
 read_cfp:
@@ -290,10 +291,11 @@ read_cfp:
 
   // TODO add guard checks here
   bpf_probe_read_user(&control_frame, sizeof(rb_control_frame_t), (void *)(stack_ptr));
+  current_ep = (void *) control_frame.ep;
 
 read_ep:
   if (bpf_probe_read_user(
-        &vm_env, sizeof(vm_env), (void *)(control_frame.ep - sizeof(vm_env) + sizeof(void *)))) {
+        &vm_env, sizeof(vm_env), (void *)(current_ep - sizeof(vm_env) + sizeof(void *)))) {
     DEBUG_PRINT("ruby: failed to get vm env");
     increment_metric(metricID_UnwindRubyErrReadEp);
     return ERR_RUBY_READ_EP;
@@ -304,16 +306,11 @@ read_ep:
 
   me_or_cref = (u64)vm_env.me_cref;
 
-  // TODO this ends up being super expensive in terms of verifier insn
-  // see if we can handle this case more elegantly
-  if (!final_iteration && ((u64)vm_env.flags & VM_ENV_FLAG_LOCAL)) {
-    can_be_svar = 1;
-  }
 check_me:
 
   DEBUG_PRINT("ruby: checking %llx", me_or_cref);
   if (me_or_cref == 0)
-    goto done_check;
+    goto next_ep;
 
   if (bpf_probe_read_user(&rbasic_flags, sizeof(rbasic_flags), (void *)(me_or_cref))) {
     DEBUG_PRINT("ruby: failed to read flags to check method entry %llx", (u64)me_or_cref);
@@ -322,36 +319,51 @@ check_me:
   }
 
   // https://github.com/ruby/ruby/blob/3361aa5c7df35b1d1daea578fefec3addf29c9a6/internal/imemo.h#L165-L169
-  switch ((rbasic_flags >> RUBY_FL_USHIFT) & IMEMO_MASK) {
-  case IMEMO_MENT:
-    DEBUG_PRINT("ruby: imemo type is method entry");
-    frame_type = FRAME_TYPE_CME;
-    frame_addr = me_or_cref;
-    goto done_check;
-  case IMEMO_CREF: goto done_check;
-  case IMEMO_SVAR:
-    if (can_be_svar) {
-      final_iteration = true;
-      u64 svar_cref   = 0;
+  imemo_mask = (rbasic_flags >> RUBY_FL_USHIFT) & IMEMO_MASK;
+
+  if ((u64)vm_env.flags & VM_ENV_FLAG_LOCAL) {
+    switch (imemo_mask) {
+    case IMEMO_MENT:
+      DEBUG_PRINT("ruby: imemo type is method entry");
+      frame_type = FRAME_TYPE_CME;
+      frame_addr = me_or_cref;
+      goto done_check;
+    case IMEMO_SVAR:
       if (bpf_probe_read_user(&svar_cref, sizeof(svar_cref), (void *)(me_or_cref + 8))) {
         DEBUG_PRINT("ruby: failed to dereference svar %llx", (u64)me_or_cref);
         // TODO have a named error for this
         return -1;
       }
       me_or_cref  = svar_cref;
-      can_be_svar = 0;
-      if (ep_check < max_ep_check) {
-        ep_check++;
-        goto check_me;
-      } else {
+
+      if (bpf_probe_read_user(&rbasic_flags, sizeof(rbasic_flags), (void *)(me_or_cref))) {
+        DEBUG_PRINT("ruby: failed to read flags to check method entry %llx", (u64)me_or_cref);
+        // TODO have a named error for this
         return -1;
       }
+      imemo_mask = (rbasic_flags >> RUBY_FL_USHIFT) & IMEMO_MASK;
+      if (imemo_mask == IMEMO_MENT) {
+        DEBUG_PRINT("ruby: imemo type is method entry");
+        frame_type = FRAME_TYPE_CME;
+        frame_addr = me_or_cref;
+        goto done_check;
+      }
+      goto done_check;
+    default:
+      goto done_check;
     }
-    goto done_check;
-  default: goto done_check;
+  } else {
+    if (imemo_mask == IMEMO_MENT) {
+      DEBUG_PRINT("ruby: imemo type is method entry");
+      frame_type = FRAME_TYPE_CME;
+      frame_addr = me_or_cref;
+      goto done_check;
+    }
   }
 
-  if (!final_iteration && ep_check < max_ep_check && (!((u64)vm_env.flags & VM_ENV_FLAG_LOCAL))) {
+next_ep:
+  if (ep_check < max_ep_check && (!((u64)vm_env.flags & VM_ENV_FLAG_LOCAL))) {
+    current_ep = (void *) vm_env.specval;
     ep_check++;
     goto read_ep;
   }
@@ -360,54 +372,8 @@ check_me:
   if (ep_check >= max_ep_check)
     return -1;
 
+
 done_check:
-
-  if (frame_type == FRAME_TYPE_CME) {
-    // vms.rb_method_entry_struct.def = 16
-    // u8 method_type = 0;
-    void *method_def;
-    if (bpf_probe_read_user(&method_def, sizeof(method_def), (void *)(frame_addr + 16))) {
-      DEBUG_PRINT("ruby: failed to read method type ptr %llx", frame_addr);
-      // TODO have a named error for this
-      return -1;
-    }
-
-    //extra_addr = (u64)method_def;
-    // if (bpf_probe_read_user(&method_type, sizeof(method_type), (void *)(method_def))) {
-    //   DEBUG_PRINT("ruby: failed to read method type %llx", (u64) method_def);
-    //   // TODO have a named error for this
-    //   return -1;
-    // }
-
-    //// It is a 4 bit bitfield
-    // method_type &= 0xF;
-
-    //// If it is iseq or cfunc, pass it though. Anything else we'll use frame type iseq
-    // switch (method_type) {
-    // case VM_METHOD_TYPE_ISEQ:
-    //   break;
-    // case VM_METHOD_TYPE_CFUNC:
-    //   break;
-    // default:
-    //   frame_type = FRAME_TYPE_NONE;
-    //   goto iseq_frame;
-    // }
-
-    // void * method_body;
-    // if (bpf_probe_read_user(&method_body, sizeof(method_body), (void *)(method_def + 8))) {
-    //   DEBUG_PRINT("ruby: failed to method body %llx", (u64) method_def);
-    //   // TODO have a named error for this
-    //   return -1;
-    // }
-    // void * iseq_body;
-    // if (bpf_probe_read_user(&iseq_body, sizeof(iseq_body), (void *)(method_body + 0 + 16))) {
-    //   DEBUG_PRINT("ruby: failed to method body %llx", (u64) method_def);
-    //   // TODO have a named error for this
-    //   return -1;
-    // }
-  }
-
-iseq_frame:
   if (frame_type == FRAME_TYPE_NONE) {
     if (control_frame.iseq == NULL) {
       DEBUG_PRINT("ruby: NULL iseq entry");
