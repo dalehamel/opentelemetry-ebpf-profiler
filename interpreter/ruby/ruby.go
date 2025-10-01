@@ -959,7 +959,7 @@ func (r *rubyInstance) id2str(originalId uint64) (libpf.String, error) {
 	return symbolName, err
 }
 
-func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, fallback libpf.Address) (libpf.String, libpf.String, libpf.String, bool, libpf.Address, error) {
+func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, libpf.String, libpf.String, bool, libpf.Address, error) {
 	// Get the classpath, and figure out the iseq body offset from the definition
 	// so that we can get the name and line number as below
 
@@ -977,15 +977,10 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, fallback libpf.Add
 	methodDefinition := r.rm.Ptr(cmeAddr + libpf.Address(vms.rb_method_entry_struct.def))
 	log.Debugf("Method def %x", methodDefinition)
 
-read_def:
 	// We do a direct read, as a value of 0 would be mistaken for ISEQ type
 	var buf [1]byte
 	if r.rm.Read(methodDefinition+libpf.Address(vms.rb_method_definition_struct.method_type), buf[:]) != nil {
-		log.Errorf("Unable to read method type, bias %08x", r.rm.Bias)
-		if methodDefinition != fallback {
-			methodDefinition = fallback
-			goto read_def
-		}
+		return libpf.NullString, libpf.NullString, libpf.NullString, false, iseqBody, fmt.Errorf("Unable to read method type, CME (%08x) is corrupt, method def %08X", cmeAddr, methodDefinition)
 	}
 
 	// NOTE - it is stored in a bitfield of size 4, so we must mask with 0xF
@@ -1132,7 +1127,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	case support.RubyFrameTypeCME:
 		cme = frameAddr
 		log.Debugf("Got ruby CME at 0x%08x", cme)
-		classPath, methodName, sourceFile, singleton, iseqBody, err = r.processCmeFrame(cme, libpf.Address(frame.Extra))
+		classPath, methodName, sourceFile, singleton, iseqBody, err = r.processCmeFrame(cme)
 		if err != nil {
 			log.Errorf("Tried and failed to process as CME frame %v", err)
 		}

@@ -235,7 +235,7 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
     }
   }
 
-  u64 extra_addr;
+  u64 extra_addr = 0;
   u64 frame_addr;
   u8 frame_type;
   // iseq_addr holds the address to a rb_iseq_struct struct
@@ -372,7 +372,7 @@ done_check:
       return -1;
     }
 
-    extra_addr = (u64)method_def;
+    //extra_addr = (u64)method_def;
     // if (bpf_probe_read_user(&method_type, sizeof(method_type), (void *)(method_def))) {
     //   DEBUG_PRINT("ruby: failed to read method type %llx", (u64) method_def);
     //   // TODO have a named error for this
