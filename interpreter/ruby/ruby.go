@@ -951,8 +951,7 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, fallback libpf.Add
 	// We do a direct read, as a value of 0 would be mistaken for ISEQ type
 	var buf [1]byte
 	if r.rm.Read(methodDefinition+libpf.Address(vms.rb_method_definition_struct.method_type), buf[:]) != nil {
-		log.Errorf("Unable to read method type")
-		return libpf.NullString, libpf.NullString, libpf.NullString, false, iseqBody, fmt.Errorf("unable to read method type")
+		log.Errorf("Unable to read method type, bias %08x", r.rm.Bias)
 	}
 
 	// NOTE - it is stored in a bitfield of size 4, so we must mask with 0xF
@@ -972,7 +971,7 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, fallback libpf.Add
 		methodBody := r.rm.Ptr(methodDefinition + libpf.Address(vms.rb_method_definition_struct.body))
 		if methodBody == 0 {
 			log.Errorf("method body was empty, using fallback for iseqbody")
-			return libpf.NullString, libpf.NullString, libpf.NullString, false, fallback, fmt.Errorf("unable to read method body, classpath: %s", classPath.String())
+			return classPath, libpf.NullString, libpf.NullString, false, fallback, fmt.Errorf("unable to read method body, classpath: %s", classPath.String())
 		}
 
 		iseqBody = r.rm.Ptr(methodBody + libpf.Address(vms.rb_method_iseq_struct.iseqptr+vms.iseq_struct.body))
