@@ -261,6 +261,7 @@ check_me:
     return -1;
   }
 
+  // https://github.com/ruby/ruby/blob/3361aa5c7df35b1d1daea578fefec3addf29c9a6/internal/imemo.h#L165-L169
   switch ((rbasic_flags >> RUBY_FL_USHIFT) & IMEMO_MASK) {
   case IMEMO_MENT:
     DEBUG_PRINT("ruby: imemo type is method entry");
