@@ -1367,9 +1367,9 @@ func profileFrameFullLabel(classPath, baseLabel, label libpf.String, singleton, 
 	baseLabelLength := len(baseLabel.String())
 	prefixLen := labelLength - baseLabelLength
 
-	log.Debugf("label: %s", label.String())
-	log.Debugf("base_label: %s", baseLabel.String())
-	log.Debugf("qualified: %s", qualified.String())
+	//log.Debugf("label: %s", label.String())
+	//log.Debugf("base_label: %s", baseLabel.String())
+	//log.Debugf("qualified: %s", qualified.String())
 
 	// Ensure prefixLen doesn't exceed label length (defensive programming)
 	if prefixLen < 0 {

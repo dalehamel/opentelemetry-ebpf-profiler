@@ -21,13 +21,9 @@ bpf_map_def SEC("maps") ruby_procs = {
 // NOTE the maximum size stack is this times 33
 #define FRAMES_PER_WALK_RUBY_STACK 64
 
-#define VM_METHOD_TYPE_ISEQ  0
-#define VM_METHOD_TYPE_CFUNC 1
-
 #define VM_ENV_FLAG_LOCAL 0x2
 #define RUBY_FL_USHIFT    12
 #define IMEMO_MASK        0x0f
-#define IMEMO_CREF        1
 #define IMEMO_SVAR        2
 #define IMEMO_MENT        6
 
@@ -315,7 +311,8 @@ check_me:
   if (bpf_probe_read_user(&rbasic_flags, sizeof(rbasic_flags), (void *)(me_or_cref))) {
     DEBUG_PRINT("ruby: failed to read flags to check method entry %llx", (u64)me_or_cref);
     // TODO have a named error for this
-    return -1;
+    //return -1;
+    return ERR_PYTHON_READ_TSD_BASE;
   }
 
   // https://github.com/ruby/ruby/blob/3361aa5c7df35b1d1daea578fefec3addf29c9a6/internal/imemo.h#L165-L169
@@ -332,14 +329,18 @@ check_me:
       if (bpf_probe_read_user(&svar_cref, sizeof(svar_cref), (void *)(me_or_cref + 8))) {
         DEBUG_PRINT("ruby: failed to dereference svar %llx", (u64)me_or_cref);
         // TODO have a named error for this
-        return -1;
+        //return -1;
+        //goto done_check;
+        return ERR_RUBY_READ_ISEQ_ENCODED;
       }
       me_or_cref  = svar_cref;
 
       if (bpf_probe_read_user(&rbasic_flags, sizeof(rbasic_flags), (void *)(me_or_cref))) {
         DEBUG_PRINT("ruby: failed to read flags to check method entry %llx", (u64)me_or_cref);
         // TODO have a named error for this
-        return -1;
+        //goto done_check;
+        //return -1;
+        return ERR_RUBY_READ_ISEQ_SIZE;
       }
       imemo_mask = (rbasic_flags >> RUBY_FL_USHIFT) & IMEMO_MASK;
       if (imemo_mask == IMEMO_MENT) {
@@ -371,15 +372,16 @@ next_ep:
   // TODO have a named error for this
   // TODO fallback to checking in userspace from EP pointer
   if (ep_check >= max_ep_check)
-    goto skip;
     //return -1;
+    return ERR_RUBY_READ_ISEQ_BODY;
 
 
 done_check:
   if (frame_type == FRAME_TYPE_NONE) {
     if (control_frame.iseq == NULL) {
       DEBUG_PRINT("ruby: NULL iseq entry");
-      return -1;
+      //return -1;
+      return ERR_PYTHON_BAD_AUTO_TLS_KEY_ADDR;
     }
     frame_type = FRAME_TYPE_ISEQ;
     frame_addr = (u64)control_frame.iseq;
