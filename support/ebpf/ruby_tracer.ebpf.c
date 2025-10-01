@@ -305,34 +305,35 @@ done_check:
 
   if (frame_type == FRAME_TYPE_CME) {
     //vms.rb_method_entry_struct.def = 16
-    u8 method_type = 0;
+    //u8 method_type = 0;
     void* method_def;
     if (bpf_probe_read_user(&method_def, sizeof(method_def), (void *)(frame_addr + 16 ))) {
-      DEBUG_PRINT("ruby: failed to method type ptr %llx", frame_addr);
+      DEBUG_PRINT("ruby: failed to read method type ptr %llx", frame_addr);
       // TODO have a named error for this
       return -1;
     }
 
-    if (bpf_probe_read_user(&method_type, sizeof(method_type), (void *)(method_def))) {
-      DEBUG_PRINT("ruby: failed to method type %llx", (u64) method_def);
-      // TODO have a named error for this
-      return -1;
-    }
+    extra_addr = (u64) method_def;
+    //if (bpf_probe_read_user(&method_type, sizeof(method_type), (void *)(method_def))) {
+    //  DEBUG_PRINT("ruby: failed to read method type %llx", (u64) method_def);
+    //  // TODO have a named error for this
+    //  return -1;
+    //}
 
 
-    // It is a 4 bit bitfield
-    method_type &= 0xF;
+    //// It is a 4 bit bitfield
+    //method_type &= 0xF;
 
-    // If it is iseq or cfunc, pass it though. Anything else we'll use frame type iseq
-    switch (method_type) {
-    case VM_METHOD_TYPE_ISEQ:
-      break;
-    case VM_METHOD_TYPE_CFUNC:
-      break;
-    default:
-      frame_type = FRAME_TYPE_NONE;
-      goto iseq_frame;
-    }
+    //// If it is iseq or cfunc, pass it though. Anything else we'll use frame type iseq
+    //switch (method_type) {
+    //case VM_METHOD_TYPE_ISEQ:
+    //  break;
+    //case VM_METHOD_TYPE_CFUNC:
+    //  break;
+    //default:
+    //  frame_type = FRAME_TYPE_NONE;
+    //  goto iseq_frame;
+    //}
 
     //void * method_body;
     //if (bpf_probe_read_user(&method_body, sizeof(method_body), (void *)(method_def + 8))) {
@@ -358,13 +359,13 @@ iseq_frame:
     frame_addr = (u64)control_frame.iseq;
   }
 
-  if (control_frame.iseq != NULL) {
-    if (bpf_probe_read_user(&extra_addr, sizeof(extra_addr), (void *)(control_frame.iseq + rubyinfo->body))) {
-      DEBUG_PRINT("ruby: failed to get iseq body");
-      increment_metric(metricID_UnwindRubyErrReadIseqBody);
-      return ERR_RUBY_READ_ISEQ_BODY;
-    }
-  }
+  //if (control_frame.iseq != NULL) {
+  //  if (bpf_probe_read_user(&extra_addr, sizeof(extra_addr), (void *)(control_frame.iseq + rubyinfo->body))) {
+  //    DEBUG_PRINT("ruby: failed to get iseq body");
+  //    increment_metric(metricID_UnwindRubyErrReadIseqBody);
+  //    return ERR_RUBY_READ_ISEQ_BODY;
+  //  }
+  //}
 
   pc        = (u64)control_frame.pc;
   // bpf_probe_read_user(&iseq_addr, sizeof(iseq_addr), (void *)(stack_ptr + rubyinfo->iseq));
