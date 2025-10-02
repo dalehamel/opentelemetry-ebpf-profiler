@@ -380,29 +380,22 @@ done_check:
       //return -1;
       return ERR_PYTHON_BAD_AUTO_TLS_KEY_ADDR;
     }
-    frame_type = FRAME_TYPE_ISEQ;
-    frame_addr = (u64)control_frame.iseq;
-    // TODO dereference the iseq body and push that in the iseq case
+
+    if (control_frame.iseq != NULL) {
+      if (bpf_probe_read_user(&frame_addr, sizeof(frame_addr), (void *)(control_frame.iseq +
+      rubyinfo->body))) {
+        DEBUG_PRINT("ruby: failed to get iseq body");
+        increment_metric(metricID_UnwindRubyErrReadIseqBody);
+        return ERR_RUBY_READ_ISEQ_BODY;
+      }
+      frame_type = FRAME_TYPE_ISEQ;
+    }
   }
 
-  // TODO save ep_check into the value of extra_addr so we can check in userspace
-  // what the actual maximum ep walk we had to do is. We are probably ok to lower it to 5 again
+  // TODO delete me, diagnostics for unwinding
+  extra_addr = ep_check;
 
-  // if (control_frame.iseq != NULL) {
-  //   if (bpf_probe_read_user(&extra_addr, sizeof(extra_addr), (void *)(control_frame.iseq +
-  //   rubyinfo->body))) {
-  //     DEBUG_PRINT("ruby: failed to get iseq body");
-  //     increment_metric(metricID_UnwindRubyErrReadIseqBody);
-  //     return ERR_RUBY_READ_ISEQ_BODY;
-  //   }
-  // }
-
-  // TODO actually check the frame type is CME and cfunc, this is a shitty check
-
-  if (((frame_flags & VM_FRAME_MAGIC_MASK) == VM_FRAME_MAGIC_CFUNC) || pc == 0) {
-    // Ruby frames without a PC or iseq are special frames and do not hold information
-    // we can use further on. So we either skip them or ask the native unwinder to continue.
-
+  if ((frame_flags & VM_FRAME_MAGIC_MASK) == VM_FRAME_MAGIC_CFUNC) {
     //if (rubyinfo->version < 0x20600) {
     //  // With Ruby version 2.6 the scope of our entry symbol ruby_current_execution_context_ptr
     //  // got extended. We need this extension to jump back unwinding Ruby VM frames if we

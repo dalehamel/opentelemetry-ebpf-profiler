@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"unsafe"
 
 	log "github.com/sirupsen/logrus"
@@ -134,7 +135,8 @@ var (
 	// regex to extract a version from a string
 	rubyVersionRegex = regexp.MustCompile(`^(\d)\.(\d)\.(\d)$`)
 
-	//rubyProcessDied  = libpf.Intern("PROCESS_DIED")
+	rubyProcessDied  = libpf.Intern("PROCESS_DIED")
+	rubyDeadFile     = libpf.Intern("<dead>")
 	rubyJitFrame     = libpf.Intern("JIT")
 	rubyJitDummyFile = libpf.Intern("<jitted code>")
 	rubyGcRunning    = libpf.Intern("GC_RUNNING")
@@ -476,8 +478,10 @@ type rubyInstance struct {
 	// cmeCache maps a CME address to the symbolized info
 	cmeCache *freelru.LRU[libpf.Address, *rubyCme]
 
-	// Just for statistics, delete this later
+	// TODO Just for statistics, delete this later
 	uniqueCmes map[libpf.Address]struct{}
+	// TODO just for stats
+	maxEpCheck uint64
 
 	// addrToString maps an address to an extracted Ruby String from this address.
 	addrToString *freelru.LRU[libpf.Address, libpf.String]
@@ -1178,6 +1182,15 @@ func (r *rubyInstance) SynchronizeMappings(ebpf interpreter.EbpfHandler,
 	return nil
 }
 
+func processDied(frames *libpf.Frames) {
+	frames.Append(&libpf.Frame{
+		Type:         libpf.RubyFrame,
+		FunctionName: rubyProcessDied,
+		SourceFile:   rubyDeadFile,
+		SourceLine:   0,
+	})
+}
+
 func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error {
 	if !frame.Type.IsInterpType(libpf.Ruby) {
 		return interpreter.ErrMismatchInterpreterType
@@ -1204,6 +1217,11 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	frameAddr := libpf.Address(frame.File & support.RubyAddrMask48Bit)
 	frameAddrType := uint8(frame.File >> 48)
 
+	if uint64(frame.Extra) > r.maxEpCheck {
+		r.maxEpCheck = uint64(frame.Extra)
+		log.Debugf("Most EP walks required: %d", r.maxEpCheck)
+	}
+
 	switch frameAddrType {
 	case support.RubyFrameTypeCME:
 		cme = frameAddr
@@ -1216,6 +1234,11 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		var cmeHit bool
 		cmeEntry, cmeHit = r.cmeCache.Get(cme)
 		if !cmeHit {
+			if _, err := r.PtrCheck(cme); err != nil && errors.Is(err, syscall.ESRCH) {
+				processDied(frames)
+				// Keep going in case other frames were cached
+				return nil
+			}
 			// TODO if the process is dead and we didn't get a hit, insert a special dummy frame
 			cmeEntry = &rubyCme{}
 			//log.Debugf("Got ruby CME at 0x%08x", cme)
@@ -1232,8 +1255,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 			cframe = cmeEntry.cframe
 		}
 	case support.RubyFrameTypeISEQ:
-		iseqAddr := libpf.Address(frameAddr)
-		iseqBody = r.rm.Ptr(iseqAddr + libpf.Address(vms.iseq_struct.body))
+		iseqBody = libpf.Address(frameAddr)
 	case support.RubyFrameTypeGC:
 		gcMode := frameAddr
 		var gcModeStr libpf.String
@@ -1290,6 +1312,11 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 			ok = true
 		}
 		if !ok {
+			if _, err := r.PtrCheck(iseqBody); err != nil && errors.Is(err, syscall.ESRCH) {
+				processDied(frames)
+				// keep symbolizing in case other frames were cached
+				return nil
+			}
 			lineNo, err := r.getRubyLineNo(iseqBody, uint64(pc))
 			if err != nil {
 				lineNo = 0
