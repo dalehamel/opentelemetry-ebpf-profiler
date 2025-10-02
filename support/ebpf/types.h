@@ -463,6 +463,9 @@ typedef struct RubyProcInfo {
   // current_ctx_ptr holds the address of the symbol ruby_current_execution_context_ptr.
   u64 current_ec_tls_offset;
 
+  // JIT regions, for detecting if a native PC was JIT
+  u64 jit_start, jit_end;
+
   // tls_module holds the index for libruby.so to be able to look up TLS data from DTV.
   u8 tls_module_index;
 
@@ -684,8 +687,8 @@ typedef struct RubyUnwindState {
   void *last_stack_frame;
   // Framefor last cfunc before we switched to native unwinder
   u64 cfunc_saved_frame;
-  // Is it a CME (fully processed) or EP (more processing needed)
-  u8 cfunc_saved_frame_type;
+  // Detect if JIT is enabled
+  bool jit_detected;
 } RubyUnwindState;
 
 // Container for additional scratch space needed by the HotSpot unwinder.

@@ -197,6 +197,7 @@ const (
 	RubyFrameTypeCME  = C.FRAME_TYPE_CME
 	RubyFrameTypeISEQ = C.FRAME_TYPE_ISEQ
 	RubyFrameTypeGC   = C.FRAME_TYPE_GC
+	RubyFrameTypeJIT  = C.FRAME_TYPE_JIT
 
 	RubyGcModeNone       = C.GC_MODE_NONE
 	RubyGcModeMarking    = C.GC_MODE_MARKING

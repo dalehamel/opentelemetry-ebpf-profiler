@@ -272,6 +272,8 @@ type RubyProcInfo struct {
 	Version                      uint32
 	Current_ctx_ptr              uint64
 	Current_ec_tls_offset        uint64
+	Jit_start                    uint64
+	Jit_end                      uint64
 	Tls_module_index             uint8
 	Dtv_entry_step               uint8
 	Vm_stack                     uint8
@@ -323,7 +325,7 @@ const (
 	sizeof_ApmIntProcInfo = 0x8
 	sizeof_DotnetProcInfo = 0x4
 	sizeof_PHPProcInfo    = 0x18
-	sizeof_RubyProcInfo   = 0x30
+	sizeof_RubyProcInfo   = 0x40
 )
 
 const (
@@ -378,6 +380,7 @@ const (
 	RubyFrameTypeCME  = 0x1
 	RubyFrameTypeISEQ = 0x2
 	RubyFrameTypeGC   = 0x3
+	RubyFrameTypeJIT  = 0x4
 
 	RubyGcModeNone       = 0x0
 	RubyGcModeMarking    = 0x1

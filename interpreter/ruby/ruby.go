@@ -135,7 +135,8 @@ var (
 	rubyVersionRegex = regexp.MustCompile(`^(\d)\.(\d)\.(\d)$`)
 
 	//rubyProcessDied  = libpf.Intern("PROCESS_DIED")
-
+	rubyJitFrame     = libpf.Intern("JIT")
+	rubyJitDummyFile = libpf.Intern("<jitted code>")
 	rubyGcRunning    = libpf.Intern("GC_RUNNING")
 	rubyGcMarking    = libpf.Intern("GC_MARKING")
 	rubyGcSweeping   = libpf.Intern("GC_SWEEPING")
@@ -381,10 +382,12 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 	return &rubyInstance{
 		r:                 r,
 		rm:                rm,
+		procInfo:          cdata,
 		globalSymbolsAddr: r.globalSymbolsAddr + bias,
 		// TODO - we can probably just rely on the frame cache added in
 		// https://github.com/open-telemetry/opentelemetry-ebpf-profiler/commit/97be3669b0f0d66f52ff9d6d33cd482f4eddb6d6
 		cmeCache:             cmeCache,
+		// TODO delete me, was just for debugging
 		uniqueCmes:           make(map[libpf.Address]struct{}),
 		iseqBodyPCToFunction: iseqBodyPCToFunction,
 		addrToString:         addrToString,
@@ -464,6 +467,7 @@ type rubyInstance struct {
 	r  *rubyData
 	rm remotememory.RemoteMemory
 
+	procInfo support.RubyProcInfo
 	globalSymbolsAddr libpf.Address
 	// iseqBodyPCToFunction maps an address and Ruby VM program counter combination to extracted
 	// information from a Ruby instruction sequence object.
@@ -1096,19 +1100,25 @@ func (r *rubyInstance) SynchronizeMappings(ebpf interpreter.EbpfHandler,
 	log.Debugf("Synchronizing ruby mappings")
 	pid := pr.PID()
 	r.mappingGeneration++
+	var jitMapping *process.Mapping
+	jitFound := false
 	for idx := range mappings {
 		m := &mappings[idx]
 		if !m.IsExecutable() || !m.IsAnonymous() {
 			continue
 		}
+		// If prctl is allowed, ruby should label the memory region
+		// always prefer that
 		if strings.Contains(m.Path.String(), "jit_reserve_addr_space") {
-			mStart := m.Vaddr
-			interpRanges := []util.Range{util.Range{Start: mStart, End: mStart + m.Length}}
-			if err := ebpf.UpdateInterpreterOffsets(support.ProgUnwindRuby, 0x1,
-				interpRanges); err != nil {
-				return err
-			}
-			log.Debugf("Added jit mapping %v to interpreter ranges, %v", m, interpRanges)
+			jitMapping = m
+			jitFound = true
+		}
+		// Use the first executable anon region we find if it isn't labeled
+		// If we find more, prefer ones earlier in memory or larger in size
+		if !jitFound && (jitMapping == nil || m.Vaddr < jitMapping.Vaddr || m.Length > jitMapping.Length) {
+			// Don't set jitFound here as it is a heuristic, we aren't sure
+			// could be on a system without linux config flag to allow prctl to label memoy
+			jitMapping = m
 		}
 
 		if _, exists := r.mappings[*m]; exists {
@@ -1140,7 +1150,14 @@ func (r *rubyInstance) SynchronizeMappings(ebpf interpreter.EbpfHandler,
 			r.prefixes[prefix] = &mappingGeneration
 		}
 	}
-
+	if jitMapping != nil {
+		r.procInfo.Jit_start = jitMapping.Vaddr
+		r.procInfo.Jit_end = jitMapping.Vaddr + jitMapping.Length
+		if err := ebpf.UpdateProcData(libpf.Ruby, pr.PID(), unsafe.Pointer(&r.procInfo)); err != nil {
+			return err
+		}
+		log.Debugf("Added jit mapping %08x ruby prof info, %08x", r.procInfo.Jit_start, r.procInfo.Jit_end)
+	}
 	// Remove prefixes not seen
 	for prefix, generationPtr := range r.prefixes {
 		if *generationPtr == r.mappingGeneration {
@@ -1236,6 +1253,14 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 			Type:         libpf.RubyFrame,
 			FunctionName: gcModeStr,
 			SourceFile:   rubyGcDummyFile,
+			SourceLine:   0,
+		})
+		return nil
+	case support.RubyFrameTypeJIT:
+		frames.Append(&libpf.Frame{
+			Type:         libpf.RubyFrame,
+			FunctionName: rubyJitFrame,
+			SourceFile:   rubyJitDummyFile,
 			SourceLine:   0,
 		})
 		return nil

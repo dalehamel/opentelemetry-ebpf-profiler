@@ -5,6 +5,7 @@
 #define FRAME_TYPE_CME  1
 #define FRAME_TYPE_ISEQ 2
 #define FRAME_TYPE_GC   3
+#define FRAME_TYPE_JIT  4
 
 // https://github.com/ruby/ruby/blob/v3_4_5/gc/default/default.c#L438-L443
 #define GC_MODE_NONE       0

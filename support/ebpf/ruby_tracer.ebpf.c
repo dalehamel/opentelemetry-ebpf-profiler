@@ -27,6 +27,10 @@ bpf_map_def SEC("maps") ruby_procs = {
 #define IMEMO_SVAR        2
 #define IMEMO_MENT        6
 
+// https://github.com/ruby/ruby/blob/v3_4_5/vm_core.h#L1380-L1385
+#define VM_FRAME_MAGIC_MASK   0x7ffff
+#define VM_FRAME_MAGIC_CFUNC  0x55550
+
 // https://github.com/ruby/ruby/blob/v3_4_5/gc/default/default.c#L459-L464
 #define GC_MODE_MASK 0x00000003 // bits 0-1 (2 bits for mode)
 #define GC_DURING_GC (1 << 5)   // bit 5
@@ -255,7 +259,7 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
   if (record->rubyUnwindState.cfunc_saved_frame != 0) {
     ErrorCode error = push_ruby_extra(
       trace,
-      record->rubyUnwindState.cfunc_saved_frame_type,
+      FRAME_TYPE_CME,
       record->rubyUnwindState.cfunc_saved_frame,
       0,
       0);
@@ -278,17 +282,20 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
   u64 svar_cref          = 0;
   void * current_ep = NULL;
   const u64 max_ep_check = 10;
+  u64 frame_flags = 0;
+  
   u64 ep_check           = 0;
   u32 i                  = 0;
-  // UNROLL for (u32 i = 0; i < FRAMES_PER_WALK_RUBY_STACK; ++i)
-  //{
+
 read_cfp:
   pc = 0;
   ep_check = 0;
+  frame_flags = 0;
 
   // TODO add guard checks here
   bpf_probe_read_user(&control_frame, sizeof(rb_control_frame_t), (void *)(stack_ptr));
   current_ep = (void *) control_frame.ep;
+  pc = (u64)control_frame.pc;
 
 read_ep:
   if (bpf_probe_read_user(
@@ -296,6 +303,10 @@ read_ep:
     DEBUG_PRINT("ruby: failed to get vm env");
     increment_metric(metricID_UnwindRubyErrReadEp);
     return ERR_RUBY_READ_EP;
+  }
+  // Only want to check the first env for flags
+  if (frame_flags == 0) {
+    frame_flags = (u64)vm_env.flags;
   }
 
   frame_addr = 0;
@@ -371,7 +382,11 @@ done_check:
     }
     frame_type = FRAME_TYPE_ISEQ;
     frame_addr = (u64)control_frame.iseq;
+    // TODO dereference the iseq body and push that in the iseq case
   }
+
+  // TODO save ep_check into the value of extra_addr so we can check in userspace
+  // what the actual maximum ep walk we had to do is. We are probably ok to lower it to 5 again
 
   // if (control_frame.iseq != NULL) {
   //   if (bpf_probe_read_user(&extra_addr, sizeof(extra_addr), (void *)(control_frame.iseq +
@@ -382,45 +397,57 @@ done_check:
   //   }
   // }
 
-  pc = (u64)control_frame.pc;
-  // bpf_probe_read_user(&iseq_addr, sizeof(iseq_addr), (void *)(stack_ptr + rubyinfo->iseq));
-  // bpf_probe_read_user(&pc, sizeof(pc), (void *)(stack_ptr + rubyinfo->pc));
-  //  If iseq or pc is 0, then this frame represents a registered hook.
-  //  https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm.c#L1960
-  // if (pc == 0 || iseq_addr == 0) {
-  //  // Ruby frames without a PC or iseq are special frames and do not hold information
-  //  // we can use further on. So we either skip them or ask the native unwinder to continue.
+  // TODO actually check the frame type is CME and cfunc, this is a shitty check
 
-  //  if (rubyinfo->version < 0x20600) {
-  //    // With Ruby version 2.6 the scope of our entry symbol ruby_current_execution_context_ptr
-  //    // got extended. We need this extension to jump back unwinding Ruby VM frames if we
-  //    // continue at this point with unwinding native frames.
-  //    // As this is not available for Ruby versions < 2.6 we just skip this indicator frame and
-  //    // continue unwinding Ruby VM frames. Due to this issue, the ordering of Ruby and native
-  //    // frames might not be correct for Ruby versions < 2.6.
-  //    goto skip;
-  //  }
+  if (((frame_flags & VM_FRAME_MAGIC_MASK) == VM_FRAME_MAGIC_CFUNC) || pc == 0) {
+    // Ruby frames without a PC or iseq are special frames and do not hold information
+    // we can use further on. So we either skip them or ask the native unwinder to continue.
 
-  //  //// TODO see if we can drop this check and just push these
-  //  // if (
-  //  //   (ep & (RUBY_FRAME_FLAG_LAMBDA | RUBY_FRAME_FLAG_BMETHOD)) ==
-  //  //   (RUBY_FRAME_FLAG_LAMBDA | RUBY_FRAME_FLAG_BMETHOD)) {
-  //  //   // When identifying Ruby lambda blocks at this point, we do not want to return to the
-  //  //   // native unwinder. So we just skip this Ruby VM frame.
-  //  //   goto skip;
-  //  // }
+    //if (rubyinfo->version < 0x20600) {
+    //  // With Ruby version 2.6 the scope of our entry symbol ruby_current_execution_context_ptr
+    //  // got extended. We need this extension to jump back unwinding Ruby VM frames if we
+    //  // continue at this point with unwinding native frames.
+    //  // As this is not available for Ruby versions < 2.6 we just skip this indicator frame and
+    //  // continue unwinding Ruby VM frames. Due to this issue, the ordering of Ruby and native
+    //  // frames might not be correct for Ruby versions < 2.6.
+    //  goto skip;
+    //}
 
-  //  // We save this cfp on in the "Record" entry, and when we start the unwinder
-  //  // again we'll push it so that the order is correct and the cfunc "owns" any native code we
-  //  // unwound
-  //  record->rubyUnwindState.cfunc_saved_frame      = frame_addr;
-  //  record->rubyUnwindState.cfunc_saved_frame_type = frame_type;
+    //// TODO see if we can drop this check and just push these
+    // if (
+    //   (ep & (RUBY_FRAME_FLAG_LAMBDA | RUBY_FRAME_FLAG_BMETHOD)) ==
+    //   (RUBY_FRAME_FLAG_LAMBDA | RUBY_FRAME_FLAG_BMETHOD)) {
+    //   // When identifying Ruby lambda blocks at this point, we do not want to return to the
+    //   // native unwinder. So we just skip this Ruby VM frame.
+    //   goto skip;
+    // }
 
-  //  // Advance the ruby stack pointer so we will start at the next frame
-  //  stack_ptr += rubyinfo->size_of_control_frame_struct;
-  //  *next_unwinder = PROG_UNWIND_NATIVE;
-  //  goto save_state;
-  //}
+    // We cannot resume native unwinding if JIT, so just keep walking ruby
+    if(!record->rubyUnwindState.jit_detected) {
+      // We save this cfp on in the "Record" entry, and when we start the unwinder
+      // again we'll push it so that the order is correct and the cfunc "owns" any native code we
+      // unwound
+      record->rubyUnwindState.cfunc_saved_frame      = frame_addr;
+
+      // Advance the ruby stack pointer so we will start at the next frame
+      stack_ptr += rubyinfo->size_of_control_frame_struct;
+
+      *next_unwinder = PROG_UNWIND_NATIVE;
+      goto save_state;
+    }
+  } else {
+    if (rubyinfo->jit_start > 0 && record->state.pc > rubyinfo->jit_start && record->state.pc < rubyinfo->jit_end) {
+      record->rubyUnwindState.jit_detected = true;
+      DEBUG_PRINT("Detected %llx as JIT frame", (u64) record->state.pc);
+      if (trace->stack_len == 0) {
+        // If the first frame is a jit PC, the leaf ruby frame should be the jit "owner"
+        ErrorCode error = push_ruby_extra(trace, FRAME_TYPE_JIT, (u64) record->state.pc, 0, 0);
+        if (error) {
+          return error;
+        }
+      }
+    }
+  }
 
   // For symbolization of the frame we forward the information about the instruction sequence
   // and program counter to user space.
@@ -439,7 +466,7 @@ skip:
     DEBUG_PRINT("ruby: bottomed out the stack at 0x%llx", (u64)stack_ptr);
     // We have processed all frames in the Ruby VM and can stop here.
     //*next_unwinder = PROG_UNWIND_NATIVE;
-    *next_unwinder = PROG_UNWIND_STOP;
+    *next_unwinder = record->rubyUnwindState.jit_detected ? PROG_UNWIND_STOP : PROG_UNWIND_NATIVE;
     goto save_state;
   }
   stack_ptr += rubyinfo->size_of_control_frame_struct;
@@ -536,6 +563,12 @@ static EBPF_INLINE int unwind_ruby(struct pt_regs *ctx)
   }
 
   increment_metric(metricID_UnwindRubyAttempts);
+
+  // TODO check if the perf record's GC is in the detected JIT address
+  // range, and if it is, store this in unwinder state
+  // we can use this to change our unwinding strategy - if it is JIT
+  // we need to stop at native frames, if it is not jit, we can pass back
+  // to the native unwinder
 
   // Pointer for an address to a rb_execution_context_struct struct.
   void *current_ctx_addr = NULL;
