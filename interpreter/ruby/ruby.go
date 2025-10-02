@@ -389,8 +389,6 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 		// TODO - we can probably just rely on the frame cache added in
 		// https://github.com/open-telemetry/opentelemetry-ebpf-profiler/commit/97be3669b0f0d66f52ff9d6d33cd482f4eddb6d6
 		cmeCache:             cmeCache,
-		// TODO delete me, was just for debugging
-		uniqueCmes:           make(map[libpf.Address]struct{}),
 		iseqBodyPCToFunction: iseqBodyPCToFunction,
 		addrToString:         addrToString,
 		mappings:             make(map[process.Mapping]*uint32),
@@ -477,11 +475,6 @@ type rubyInstance struct {
 
 	// cmeCache maps a CME address to the symbolized info
 	cmeCache *freelru.LRU[libpf.Address, *rubyCme]
-
-	// TODO Just for statistics, delete this later
-	uniqueCmes map[libpf.Address]struct{}
-	// TODO just for stats
-	maxEpCheck uint64
 
 	// addrToString maps an address to an extracted Ruby String from this address.
 	addrToString *freelru.LRU[libpf.Address, libpf.String]
@@ -1059,7 +1052,7 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, cmeFrameType uint8
 		return classPath, cfuncName, libpf.Intern("<cfunc>"), singleton, cframe, iseqBody, nil
 	} else {
 
-
+		// TODO delete me, we should trust the values from BPF
 		// We do a direct read, as a value of 0 would be mistaken for ISEQ type
 		var buf [1]byte
 		if r.rm.Read(methodDefinition+libpf.Address(vms.rb_method_definition_struct.method_type), buf[:]) != nil {
@@ -1213,20 +1206,10 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	frameAddr := libpf.Address(frame.File & support.RubyAddrMask48Bit)
 	frameAddrType := uint8(frame.File >> 48)
 
-	if uint64(frame.Extra) > r.maxEpCheck {
-		r.maxEpCheck = uint64(frame.Extra)
-		log.Debugf("Most EP walks required: %d", r.maxEpCheck)
-	}
-
 	switch frameAddrType {
 	case support.RubyFrameTypeCmeIseq, support.RubyFrameTypeCmeCfunc:
 		cme = frameAddr
 
-		_, ok := r.uniqueCmes[cme]
-		if !ok {
-			r.uniqueCmes[cme] = struct{}{}
-			//log.Debugf("Unique CMEs %d", len(r.uniqueCmes))
-		}
 		var cmeHit bool
 		cmeEntry, cmeHit = r.cmeCache.Get(cme)
 		if !cmeHit {
@@ -1243,7 +1226,6 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 				log.Errorf("Tried and failed to process as CME frame %v", err)
 			}
 		} else {
-			//log.Debugf("Got CME cache hit! %d unique CMEs", len(r.uniqueCmes))
 			classPath = cmeEntry.classPath
 			methodName = cmeEntry.methodName
 			sourceFile = cmeEntry.sourceFile
@@ -1339,7 +1321,8 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 				libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.base_label))
 			functionName, err := r.getStringCached(funcNamePtr, r.readRubyString)
 			if err != nil {
-				functionName = libpf.Intern("UNKNOWN_FUNCTION")
+				// TODO maybe don't cache entries that are unknown, in case the lookup could succeed later?
+				functionName = libpf.Intern(fmt.Sprintf("UNKNOWN_FUNCTION %d %08x", frameAddrType, frame.Extra))
 				log.Warnf("RubySymbolizer: Failed to get source function name (iseq@0x%08x) %v", iseqBody, err)
 			}
 

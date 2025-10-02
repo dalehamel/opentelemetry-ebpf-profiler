@@ -20,6 +20,12 @@ bpf_map_def SEC("maps") ruby_procs = {
 // option is to adjust this number downwards.
 // NOTE the maximum size stack is this times 33
 #define FRAMES_PER_WALK_RUBY_STACK 48
+// When resolving a CME, we need to traverse environment pointers until we
+// find IMEMO_MENT. Since we can't do a while loop, we have to bound this
+// the max encountered in experimentation on a production rails app is 6, so 10
+// should give some wiggle room. This increases insn for the kernel verifier
+// and code in the ep check "loop" is M*N for instruction checks
+#define MAX_EP_CHECKS 10
 
 #define VM_ENV_FLAG_LOCAL 0x2
 #define RUBY_FL_USHIFT    12
@@ -235,25 +241,6 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
     }
   }
 
-  u64 extra_addr = 0;
-  u64 frame_addr;
-  u8 frame_type;
-  // iseq_addr holds the address to a rb_iseq_struct struct
-  // iseq_body points to a rb_iseq_constant_body struct
-  // void *iseq_body;
-  // pc stores the Ruby VM program counter information
-  u64 pc;
-  // iseq_encoded holds the instruction address and operands of a particular instruction sequence
-  // The format of this element is documented in:
-  // https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L328-L348
-  // u64 iseq_encoded;
-  //// iseq_size holds the size in bytes of a particular instruction sequence
-  // u32 iseq_size;
-  // s64 n;
-
-  rb_control_frame_t control_frame;
-  vm_env_t vm_env;
-
   // If we entered native unwinding because we saw a cfunc frame, lets push that
   // frame now so it can take "ownership" of the native code that was unwound
   if (record->rubyUnwindState.cfunc_saved_frame != 0) {
@@ -270,10 +257,19 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
     record->rubyUnwindState.cfunc_saved_frame = 0;
   }
 
+  // TODO delete this, likely not needed
   if (record->rubyUnwindState.last_pushed_frame == stack_ptr) {
     DEBUG_PRINT("ruby: already pushed ruby frame at 0x%llx, skipping", (u64)stack_ptr);
     stack_ptr += rubyinfo->size_of_control_frame_struct;
   }
+
+  // Type of frame we found and are pushing (encoded in upper bits of Frame
+  u8 frame_type;
+  // Actual frame address of the given type
+  u64 frame_addr;
+  // An extra addr/data we can push (useful for debugging, but left unused by design)
+  u64 extra_addr = 0;
+  u64 pc;
 
   // should be at offset 0 on the struct, and size of VALUE, so u64 should fit it
   u64 rbasic_flags       = 0;
@@ -281,11 +277,13 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
   u64 me_or_cref         = 0;
   u64 svar_cref          = 0;
   void * current_ep = NULL;
-  const u64 max_ep_check = 10;
   u64 frame_flags = 0;
   
   u64 ep_check           = 0;
   u32 i                  = 0;
+
+  rb_control_frame_t control_frame;
+  vm_env_t vm_env;
 
 read_cfp:
   pc = 0;
@@ -360,7 +358,7 @@ check_me:
   }
 
 next_ep:
-  if (ep_check++ < max_ep_check && (!((u64)vm_env.flags & VM_ENV_FLAG_LOCAL))) {
+  if (ep_check++ < MAX_EP_CHECKS && (!((u64)vm_env.flags & VM_ENV_FLAG_LOCAL))) {
     // https://github.com/ruby/ruby/blob/v3_4_5/vm_core.h#L1355
     current_ep = (void *)((u64)vm_env.specval & ~0x03);
     goto read_ep;
@@ -368,7 +366,7 @@ next_ep:
 
   // TODO have a named error for this
   // TODO fallback to checking in userspace from EP pointer
-  if (ep_check >= max_ep_check)
+  if (ep_check >= MAX_EP_CHECKS)
     return ERR_RUBY_READ_ISEQ_BODY;
   //  //return -1;
 
@@ -393,9 +391,9 @@ done_check:
   }
 
   // TODO delete me, diagnostics for unwinding
-  extra_addr = ep_check;
+  extra_addr = frame_flags;
 
-  if ((frame_flags & VM_FRAME_MAGIC_MASK) == VM_FRAME_MAGIC_CFUNC) {
+  if (((frame_flags & VM_FRAME_MAGIC_MASK) == VM_FRAME_MAGIC_CFUNC) || pc == 0) {
     frame_type = FRAME_TYPE_CME_CFUNC;
     //if (rubyinfo->version < 0x20600) {
     //  // With Ruby version 2.6 the scope of our entry symbol ruby_current_execution_context_ptr
