@@ -19,7 +19,7 @@ bpf_map_def SEC("maps") ruby_procs = {
 // we start running out of instructions in the walk_ruby_stack program, one
 // option is to adjust this number downwards.
 // NOTE the maximum size stack is this times 33
-#define FRAMES_PER_WALK_RUBY_STACK 32
+#define FRAMES_PER_WALK_RUBY_STACK 48
 
 #define VM_ENV_FLAG_LOCAL 0x2
 #define RUBY_FL_USHIFT    12
@@ -284,6 +284,7 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
   //{
 read_cfp:
   pc = 0;
+  ep_check = 0;
 
   // TODO add guard checks here
   bpf_probe_read_user(&control_frame, sizeof(rb_control_frame_t), (void *)(stack_ptr));
@@ -319,10 +320,7 @@ check_me:
   imemo_mask = (rbasic_flags >> RUBY_FL_USHIFT) & IMEMO_MASK;
 
   if ((u64)vm_env.flags & VM_ENV_FLAG_LOCAL) {
-    switch (imemo_mask) {
-    case IMEMO_MENT:
-      goto check_ment;
-    case IMEMO_SVAR:
+    if (imemo_mask == IMEMO_SVAR) {
       if (bpf_probe_read_user(&svar_cref, sizeof(svar_cref), (void *)(me_or_cref + 8))) {
         DEBUG_PRINT("ruby: failed to dereference svar %llx", (u64)me_or_cref);
         // TODO have a named error for this
@@ -340,12 +338,9 @@ check_me:
         return ERR_RUBY_READ_ISEQ_SIZE;
       }
       imemo_mask = (rbasic_flags >> RUBY_FL_USHIFT) & IMEMO_MASK;
-      goto check_ment;
-    default:
-      goto done_check;
     }
   }
-check_ment:
+
   if (imemo_mask == IMEMO_MENT) {
     DEBUG_PRINT("ruby: imemo type is method entry");
     frame_type = FRAME_TYPE_CME;
@@ -354,10 +349,9 @@ check_ment:
   }
 
 next_ep:
-  if (ep_check < max_ep_check && (!((u64)vm_env.flags & VM_ENV_FLAG_LOCAL))) {
+  if (ep_check++ < max_ep_check && (!((u64)vm_env.flags & VM_ENV_FLAG_LOCAL))) {
     // https://github.com/ruby/ruby/blob/v3_4_5/vm_core.h#L1355
     current_ep = (void *)((u64)vm_env.specval & ~0x03);
-    ep_check++;
     goto read_ep;
   }
 
