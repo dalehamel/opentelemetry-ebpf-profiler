@@ -193,11 +193,12 @@ const (
 	RubyAddrMask48Bit     = C.ADDR_MASK_48_BIT
 	RubyExtraAddrTypeMask = C.EXTRA_TYPE_MASK
 
-	RubyFrameTypeNone = C.FRAME_TYPE_NONE
-	RubyFrameTypeCME  = C.FRAME_TYPE_CME
-	RubyFrameTypeISEQ = C.FRAME_TYPE_ISEQ
-	RubyFrameTypeGC   = C.FRAME_TYPE_GC
-	RubyFrameTypeJIT  = C.FRAME_TYPE_JIT
+	RubyFrameTypeNone     = C.FRAME_TYPE_NONE
+	RubyFrameTypeCmeIseq  = C.FRAME_TYPE_CME_ISEQ
+	RubyFrameTypeCmeCfunc = C.FRAME_TYPE_CME_CFUNC
+	RubyFrameTypeIseq     = C.FRAME_TYPE_ISEQ
+	RubyFrameTypeJit      = C.FRAME_TYPE_JIT
+	RubyFrameTypeGc       = C.FRAME_TYPE_GC
 
 	RubyGcModeNone       = C.GC_MODE_NONE
 	RubyGcModeMarking    = C.GC_MODE_MARKING

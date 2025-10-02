@@ -376,11 +376,12 @@ const (
 	RubyAddrMask48Bit     = 0xffffffffffff
 	RubyExtraAddrTypeMask = 0xff000000000000
 
-	RubyFrameTypeNone = 0x0
-	RubyFrameTypeCME  = 0x1
-	RubyFrameTypeISEQ = 0x2
-	RubyFrameTypeGC   = 0x3
-	RubyFrameTypeJIT  = 0x4
+	RubyFrameTypeNone     = 0x0
+	RubyFrameTypeCmeIseq  = 0x1
+	RubyFrameTypeCmeCfunc = 0x2
+	RubyFrameTypeIseq     = 0x3
+	RubyFrameTypeJit      = 0x4
+	RubyFrameTypeGc       = 0x5
 
 	RubyGcModeNone       = 0x0
 	RubyGcModeMarking    = 0x1

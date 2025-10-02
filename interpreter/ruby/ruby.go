@@ -1023,7 +1023,8 @@ func (r *rubyInstance) PtrCheck(addr libpf.Address) (libpf.Address, error) {
 	return libpf.Address(binary.LittleEndian.Uint64(buf[:])) - r.rm.Bias, nil
 }
 
-func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, libpf.String, libpf.String, bool, bool, libpf.Address, error) {
+// TODO refactor into cframe / iseq handlers
+func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, cmeFrameType uint8) (libpf.String, libpf.String, libpf.String, bool, bool, libpf.Address, error) {
 	// Get the classpath, and figure out the iseq body offset from the definition
 	// so that we can get the name and line number as below
 
@@ -1036,27 +1037,40 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, lib
 	vms := &r.r.vmStructs
 	//log.Debugf("Got Ruby CME frame %X", cmeAddr)
 
-	vmMethodTypeIseq := uint8(0)  // VM_METHOD_TYPE_ISEQ = 0
-	vmMethodTypeCfunc := uint8(1) // VM_METHOD_TYPE_CFUNC = 1
 	methodDefinition, err := r.PtrCheck(cmeAddr + libpf.Address(vms.rb_method_entry_struct.def))
 	if err != nil {
 		return libpf.NullString, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, fmt.Errorf("Unable to read method definition, CME (%08x) %v", cmeAddr, err)
 	}
 
-	// We do a direct read, as a value of 0 would be mistaken for ISEQ type
-	var buf [1]byte
-	if r.rm.Read(methodDefinition+libpf.Address(vms.rb_method_definition_struct.method_type), buf[:]) != nil {
-		return libpf.NullString, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, fmt.Errorf("Unable to read method type, CME (%08x) is corrupt, method def %08X", cmeAddr, methodDefinition)
-	}
+	if cmeFrameType == support.RubyFrameTypeCmeCfunc {
+		var cfuncName libpf.String
+		cframe = true
+		classDefinition := r.rm.Ptr(cmeAddr + libpf.Address(vms.rb_method_entry_struct.owner))
+		classPath, singleton, err = r.readClassName(classDefinition)
+		if err != nil {
+			log.Errorf("Failed to read class name from owner for cfunc: %v", err)
+		} else {
+			log.Debugf("Got %s for cfunc owner", classPath)
+		}
+		originalId := r.rm.Uint64(methodDefinition + libpf.Address(vms.rb_method_definition_struct.original_id))
 
-	// NOTE - it is stored in a bitfield of size 4, so we must mask with 0xF
-	// https://github.com/ruby/ruby/blob/5e817f98af9024f34a3491c0aa6526d1191f8c11/method.h#L188
-	methodType := buf[0] & 0xF
-	//log.Debugf("Method type %x", methodType)
+		cfuncName, err = r.id2str(originalId)
+		log.Debugf("Got cfunc name %s", cfuncName)
+		return classPath, cfuncName, libpf.Intern("<cfunc>"), singleton, cframe, iseqBody, nil
+	} else {
 
-	switch methodType {
-	case vmMethodTypeIseq:
 
+		// We do a direct read, as a value of 0 would be mistaken for ISEQ type
+		var buf [1]byte
+		if r.rm.Read(methodDefinition+libpf.Address(vms.rb_method_definition_struct.method_type), buf[:]) != nil {
+		        return libpf.NullString, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, fmt.Errorf("Unable to read method type, CME (%08x) is corrupt, method def %08X", cmeAddr, methodDefinition)
+		}
+		
+		// NOTE - it is stored in a bitfield of size 4, so we must mask with 0xF
+		// https://github.com/ruby/ruby/blob/5e817f98af9024f34a3491c0aa6526d1191f8c11/method.h#L188
+		methodType := buf[0] & 0xF
+		log.Debugf("Method type %x", methodType)
+	
 		classDefinition := r.rm.Ptr(cmeAddr + libpf.Address(vms.rb_method_entry_struct.defined_class))
 		classPath, singleton, err = r.readClassName(classDefinition)
 		if err != nil {
@@ -1076,24 +1090,6 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address) (libpf.String, lib
 			return libpf.NullString, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, fmt.Errorf("unable to read iseq body")
 		}
 		//log.Debugf("Read CME successfully %s %08x", classPath.String(), iseqBody)
-	case vmMethodTypeCfunc:
-		var cfuncName libpf.String
-		cframe = true
-		classDefinition := r.rm.Ptr(cmeAddr + libpf.Address(vms.rb_method_entry_struct.owner))
-		classPath, singleton, err = r.readClassName(classDefinition)
-		if err != nil {
-			log.Errorf("Failed to read class name from owner for cfunc: %v", err)
-		} else {
-			log.Debugf("Got %s for cfunc owner", classPath)
-		}
-		originalId := r.rm.Uint64(methodDefinition + libpf.Address(vms.rb_method_definition_struct.original_id))
-
-		cfuncName, err = r.id2str(originalId)
-		log.Debugf("Got cfunc name %s", cfuncName)
-		return classPath, cfuncName, libpf.Intern("<cfunc>"), singleton, cframe, iseqBody, nil
-
-	default:
-		log.Warnf("Unexpected method type %d", methodType)
 	}
 
 	return classPath, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, nil
@@ -1223,7 +1219,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	}
 
 	switch frameAddrType {
-	case support.RubyFrameTypeCME:
+	case support.RubyFrameTypeCmeIseq, support.RubyFrameTypeCmeCfunc:
 		cme = frameAddr
 
 		_, ok := r.uniqueCmes[cme]
@@ -1242,7 +1238,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 			// TODO if the process is dead and we didn't get a hit, insert a special dummy frame
 			cmeEntry = &rubyCme{}
 			//log.Debugf("Got ruby CME at 0x%08x", cme)
-			classPath, methodName, sourceFile, singleton, cframe, iseqBody, err = r.processCmeFrame(cme)
+			classPath, methodName, sourceFile, singleton, cframe, iseqBody, err = r.processCmeFrame(cme, frameAddrType)
 			if err != nil {
 				log.Errorf("Tried and failed to process as CME frame %v", err)
 			}
@@ -1254,9 +1250,9 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 			singleton = cmeEntry.singleton
 			cframe = cmeEntry.cframe
 		}
-	case support.RubyFrameTypeISEQ:
+	case support.RubyFrameTypeIseq:
 		iseqBody = libpf.Address(frameAddr)
-	case support.RubyFrameTypeGC:
+	case support.RubyFrameTypeGc:
 		gcMode := frameAddr
 		var gcModeStr libpf.String
 		switch gcMode {
@@ -1278,7 +1274,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 			SourceLine:   0,
 		})
 		return nil
-	case support.RubyFrameTypeJIT:
+	case support.RubyFrameTypeJit:
 		frames.Append(&libpf.Frame{
 			Type:         libpf.RubyFrame,
 			FunctionName: rubyJitFrame,
@@ -1320,7 +1316,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 			lineNo, err := r.getRubyLineNo(iseqBody, uint64(pc))
 			if err != nil {
 				lineNo = 0
-				log.Warnf("RubySymbolizer: Failed to get line number %v", err)
+				log.Warnf("RubySymbolizer: Failed to get line number (%d) %v", frameAddrType, err)
 			}
 
 			sourceFileNamePtr := r.rm.Ptr(iseqBody +
@@ -1362,7 +1358,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		sourceLine = iseq.line
 	}
 
-	if frameAddrType == support.RubyFrameTypeCME && !cmeHit {
+	if (frameAddrType == support.RubyFrameTypeCmeIseq || frameAddrType == support.RubyFrameTypeCmeCfunc) && !cmeHit {
 		cmeEntry = &rubyCme{
 			classPath:  classPath,
 			methodName: methodName,
@@ -1404,6 +1400,7 @@ func qualifiedMethodName(classPath, methodName libpf.String, singleton bool) lib
 	return methodName
 }
 
+// TODO this should be saved in the cache, we shouldn't unconditionally run this
 func profileFrameFullLabel(classPath, baseLabel, label libpf.String, singleton, cframe bool) libpf.String {
 	qualified := qualifiedMethodName(classPath, baseLabel, singleton)
 

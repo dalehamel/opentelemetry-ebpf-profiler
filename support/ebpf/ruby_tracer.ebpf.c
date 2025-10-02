@@ -28,8 +28,8 @@ bpf_map_def SEC("maps") ruby_procs = {
 #define IMEMO_MENT        6
 
 // https://github.com/ruby/ruby/blob/v3_4_5/vm_core.h#L1380-L1385
-#define VM_FRAME_MAGIC_MASK   0x7ffff
-#define VM_FRAME_MAGIC_CFUNC  0x55550
+#define VM_FRAME_MAGIC_MASK   0x7fff0001
+#define VM_FRAME_MAGIC_CFUNC  0x55550001
 
 // https://github.com/ruby/ruby/blob/v3_4_5/gc/default/default.c#L459-L464
 #define GC_MODE_MASK 0x00000003 // bits 0-1 (2 bits for mode)
@@ -259,7 +259,7 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
   if (record->rubyUnwindState.cfunc_saved_frame != 0) {
     ErrorCode error = push_ruby_extra(
       trace,
-      FRAME_TYPE_CME,
+      FRAME_TYPE_CME_CFUNC,
       record->rubyUnwindState.cfunc_saved_frame,
       0,
       0);
@@ -354,7 +354,7 @@ check_me:
 
   if (imemo_mask == IMEMO_MENT) {
     DEBUG_PRINT("ruby: imemo type is method entry");
-    frame_type = FRAME_TYPE_CME;
+    frame_type = FRAME_TYPE_CME_ISEQ;
     frame_addr = me_or_cref;
     goto done_check;
   }
@@ -396,6 +396,7 @@ done_check:
   extra_addr = ep_check;
 
   if ((frame_flags & VM_FRAME_MAGIC_MASK) == VM_FRAME_MAGIC_CFUNC) {
+    frame_type = FRAME_TYPE_CME_CFUNC;
     //if (rubyinfo->version < 0x20600) {
     //  // With Ruby version 2.6 the scope of our entry symbol ruby_current_execution_context_ptr
     //  // got extended. We need this extension to jump back unwinding Ruby VM frames if we
@@ -405,15 +406,6 @@ done_check:
     //  // frames might not be correct for Ruby versions < 2.6.
     //  goto skip;
     //}
-
-    //// TODO see if we can drop this check and just push these
-    // if (
-    //   (ep & (RUBY_FRAME_FLAG_LAMBDA | RUBY_FRAME_FLAG_BMETHOD)) ==
-    //   (RUBY_FRAME_FLAG_LAMBDA | RUBY_FRAME_FLAG_BMETHOD)) {
-    //   // When identifying Ruby lambda blocks at this point, we do not want to return to the
-    //   // native unwinder. So we just skip this Ruby VM frame.
-    //   goto skip;
-    // }
 
     // We cannot resume native unwinding if JIT, so just keep walking ruby
     if(!record->rubyUnwindState.jit_detected) {
@@ -429,9 +421,10 @@ done_check:
       goto save_state;
     }
   } else {
+    // NOTE - it may be possible for the leaf frame to be a cframe, calling into jit
     if (rubyinfo->jit_start > 0 && record->state.pc > rubyinfo->jit_start && record->state.pc < rubyinfo->jit_end) {
       record->rubyUnwindState.jit_detected = true;
-      DEBUG_PRINT("Detected %llx as JIT frame", (u64) record->state.pc);
+      DEBUG_PRINT("Detected PC: %llx as JIT frame", (u64) record->state.pc);
       if (trace->stack_len == 0) {
         // If the first frame is a jit PC, the leaf ruby frame should be the jit "owner"
         ErrorCode error = push_ruby_extra(trace, FRAME_TYPE_JIT, (u64) record->state.pc, 0, 0);
@@ -613,6 +606,9 @@ static EBPF_INLINE int unwind_ruby(struct pt_regs *ctx)
 
   if (!current_ctx_addr) {
     goto exit;
+  }
+  if (rubyinfo->jit_start > 0 && record->state.pc > rubyinfo->jit_start && record->state.pc < rubyinfo->jit_end) {
+    record->rubyUnwindState.jit_detected = true;
   }
 
   error = walk_ruby_stack(record, rubyinfo, current_ctx_addr, &unwinder);
