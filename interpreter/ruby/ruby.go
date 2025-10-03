@@ -206,7 +206,7 @@ type rubyData struct {
 		// https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L311
 		iseq_constant_body struct {
 			iseq_type, encoded, size, location, insn_info_body, insn_info_size, succ_index_table uint8
-			size_of_iseq_constant_body                                                           uint16
+			local_iseq, size_of_iseq_constant_body                                               uint16
 		}
 
 		// rb_iseq_location_struct
@@ -1334,7 +1334,17 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 				log.Warnf("RubySymbolizer: Failed to get line number (%d) %v", frameAddrType, err)
 			}
 
-			sourceFileNamePtr := r.rm.Ptr(iseqBody +
+			localIseqPtr, err := r.PtrCheck(iseqBody + libpf.Address(vms.iseq_constant_body.local_iseq))
+			if err != nil {
+				log.Errorf("Unable to dereference local iseq: %v")
+			}
+
+			iseqLocalBody, err := r.PtrCheck(localIseqPtr + libpf.Address(vms.iseq_struct.body))
+			if err != nil {
+				log.Errorf("Unable to dereference local iseq body: %v")
+			}
+
+			sourceFileNamePtr := r.rm.Ptr(iseqLocalBody +
 				libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.pathobj))
 			sourceFileName, err := r.getStringCached(sourceFileNamePtr, r.readPathObjRealPath)
 			if err != nil {
@@ -1342,7 +1352,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 				log.Warnf("RubySymbolizer: Failed to get source file name %v", err)
 			}
 
-			iseqLabelPtr := r.rm.Ptr(iseqBody +
+			iseqLabelPtr := r.rm.Ptr(iseqLocalBody +
 				libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.label))
 			iseqLabel, err := r.getStringCached(iseqLabelPtr, r.readRubyString)
 			if err != nil {
@@ -1350,7 +1360,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 				log.Warnf("RubySymbolizer: Failed to get source base label (iseq@0x%08x) %v", iseqBody, err)
 			}
 
-			funcNamePtr := r.rm.Ptr(iseqBody +
+			funcNamePtr := r.rm.Ptr(iseqLocalBody +
 				libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.base_label))
 			functionName, err := r.getStringCached(funcNamePtr, r.readRubyString)
 			if err != nil {
@@ -1709,11 +1719,13 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 		vms.iseq_constant_body.insn_info_body = 112
 		vms.iseq_constant_body.insn_info_size = 128
 		vms.iseq_constant_body.succ_index_table = 136
+		vms.iseq_constant_body.local_iseq = 168
 		vms.iseq_constant_body.size_of_iseq_constant_body = 352
 	default: // 3.3.x and 3.5.x have the same values
 		vms.iseq_constant_body.insn_info_body = 112
 		vms.iseq_constant_body.insn_info_size = 128
 		vms.iseq_constant_body.succ_index_table = 136
+		vms.iseq_constant_body.local_iseq = 168
 		vms.iseq_constant_body.size_of_iseq_constant_body = 344
 	}
 	vms.iseq_location_struct.pathobj = 0

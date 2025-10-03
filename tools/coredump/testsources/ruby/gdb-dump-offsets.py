@@ -48,6 +48,7 @@ fields = {
     'iseq_constant_body.iseq_type': offset_of('rb_iseq_constant_body', 'type'),
     'iseq_constant_body.size': offset_of('rb_iseq_constant_body', 'iseq_size'),
     'iseq_constant_body.encoded': offset_of('rb_iseq_constant_body', 'iseq_encoded'),
+    'iseq_constant_body.local_iseq': offset_of('rb_iseq_constant_body', 'local_iseq'),
     'iseq_constant_body.location': offset_of('rb_iseq_constant_body', 'location'),
     'iseq_constant_body.insn_info_body': offset_of('rb_iseq_constant_body', 'insns_info.body'),
     'iseq_constant_body.insn_info_size': offset_of('rb_iseq_constant_body', 'insns_info.size'),
