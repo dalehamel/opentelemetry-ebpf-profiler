@@ -601,9 +601,9 @@ type StringReader = func(address libpf.Address) (string, error)
 // getStringCached retrieves a string from cache or reads and inserts it if it's missing.
 func (r *rubyInstance) getStringCached(addr libpf.Address, reader StringReader) (
 	libpf.String, error) {
-	if value, ok := r.addrToString.Get(addr); ok {
-		return value, nil
-	}
+	//if value, ok := r.addrToString.Get(addr); ok {
+	//	return value, nil
+	//}
 
 	str, err := reader(addr)
 	if err != nil {
