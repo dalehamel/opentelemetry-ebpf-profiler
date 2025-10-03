@@ -1339,12 +1339,12 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 			// https://github.com/ruby/ruby/blob/v3_4_5/iseq.c#L1426
 			localIseqPtr, err := r.PtrCheck(iseqBody + libpf.Address(vms.iseq_constant_body.local_iseq))
 			if err != nil {
-				log.Errorf("Unable to dereference local iseq: %v")
+				log.Errorf("Unable to dereference local iseq: %v", err)
 			}
 
 			iseqLocalBody, err := r.PtrCheck(localIseqPtr + libpf.Address(vms.iseq_struct.body))
 			if err != nil {
-				log.Errorf("Unable to dereference local iseq body: %v")
+				log.Errorf("Unable to dereference local iseq body: %v", err)
 			}
 
 			sourceFileNamePtr := r.rm.Ptr(iseqLocalBody +
@@ -1459,7 +1459,7 @@ func profileFrameFullLabel(classPath, baseLabel, label libpf.String, singleton, 
 	}
 
 	// Get the prefix from label and concatenate with qualifiedMethodName
-	return libpf.Intern(baseLabel.String()[:prefixLen] + qualified.String())
+	return libpf.Intern(label.String()[:prefixLen] + qualified.String())
 }
 
 func (r *rubyInstance) GetAndResetMetrics() ([]metrics.Metric, error) {
