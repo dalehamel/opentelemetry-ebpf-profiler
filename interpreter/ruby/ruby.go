@@ -348,9 +348,7 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 		Size_of_control_frame_struct: r.vmStructs.control_frame_struct.size_of_control_frame_struct,
 
 		Body: r.vmStructs.iseq_struct.body,
-
-		Iseq_size:    r.vmStructs.iseq_constant_body.size,
-		Iseq_encoded: r.vmStructs.iseq_constant_body.encoded,
+		Cme_method_def: r.vmStructs.rb_method_entry_struct.def,
 
 		Size_of_value: r.vmStructs.size_of_value,
 
@@ -1030,7 +1028,7 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, cmeFrameType uint8
 	vms := &r.r.vmStructs
 	//log.Debugf("Got Ruby CME frame %X", cmeAddr)
 
-	methodDefinition, err := r.PtrCheck(cmeAddr + libpf.Address(vms.rb_method_entry_struct.def))
+	methodDefinition, err := r.PtrCheck(cmeAddr + libpf.Address(vms.rb_method_entry_struct.def)) 
 	if err != nil {
 		return libpf.NullString, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, fmt.Errorf("Unable to read method definition, CME (%08x) %v", cmeAddr, err)
 	}

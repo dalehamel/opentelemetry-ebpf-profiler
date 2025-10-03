@@ -492,8 +492,8 @@ typedef struct RubyProcInfo {
   // rb_iseq_struct offsets:
   u8 body;
 
-  // rb_iseq_constant_body:
-  u8 iseq_type, iseq_encoded, iseq_size;
+  // rb_callable_method_entry_struct
+  u8 cme_method_def;
 
   // size_of_value holds the size of the macro VALUE as defined in
   // https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L1136
@@ -681,13 +681,11 @@ typedef struct PHPUnwindState {
 typedef struct RubyUnwindState {
   // Pointer to the next control frame struct in the Ruby VM stack we want to unwind.
   void *stack_ptr;
-  // Last pushed frame
-  void *last_pushed_frame;
   // Pointer to the last control frame struct in the Ruby VM stack we want to handle.
   void *last_stack_frame;
   // Framefor last cfunc before we switched to native unwinder
   u64 cfunc_saved_frame;
-  // Detect if JIT is enabled
+  // Detect if JIT code ran in the process (at any time)
   bool jit_detected;
 } RubyUnwindState;
 

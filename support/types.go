@@ -289,11 +289,10 @@ type RubyProcInfo struct {
 	Ep                           uint8
 	Size_of_control_frame_struct uint8
 	Body                         uint8
-	Iseq_type                    uint8
-	Iseq_encoded                 uint8
-	Iseq_size                    uint8
+	Cme_method_def               uint8
 	Size_of_value                uint8
 	Running_ec                   uint16
+	Pad_cgo_0                    [2]byte
 }
 type V8ProcInfo struct {
 	Version                    uint32
