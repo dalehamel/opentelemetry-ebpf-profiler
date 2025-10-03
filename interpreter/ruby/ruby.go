@@ -448,6 +448,8 @@ type rubyIseq struct {
 
 	// label
 	label libpf.String
+	// base_label
+	baseLabel libpf.String
 
 	// functionName is the function name for this sequence
 	functionName libpf.String
@@ -1213,6 +1215,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	var classPath libpf.String
 	var methodName libpf.String
 	var label libpf.String
+	var baseLabel libpf.String
 	var sourceFile libpf.String
 	var sourceLine libpf.SourceLineno
 	var iseq *rubyIseq
@@ -1334,20 +1337,8 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 				log.Warnf("RubySymbolizer: Failed to get line number (%d) %v", frameAddrType, err)
 			}
 
-			// Body used for label is indirect, need to do: iseq body -> local iseq -> iseq body
-			// https://github.com/ruby/ruby/blob/v3_4_5/vm_backtrace.c#L1943
-			// https://github.com/ruby/ruby/blob/v3_4_5/iseq.c#L1426
-			localIseqPtr, err := r.PtrCheck(iseqBody + libpf.Address(vms.iseq_constant_body.local_iseq))
-			if err != nil {
-				log.Errorf("Unable to dereference local iseq: %v", err)
-			}
 
-			iseqLocalBody, err := r.PtrCheck(localIseqPtr + libpf.Address(vms.iseq_struct.body))
-			if err != nil {
-				log.Errorf("Unable to dereference local iseq body: %v", err)
-			}
-
-			sourceFileNamePtr := r.rm.Ptr(iseqLocalBody +
+			sourceFileNamePtr := r.rm.Ptr(iseqBody +
 				libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.pathobj))
 			sourceFileName, err := r.getStringCached(sourceFileNamePtr, r.readPathObjRealPath)
 			if err != nil {
@@ -1355,7 +1346,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 				log.Warnf("RubySymbolizer: Failed to get source file name %v", err)
 			}
 
-			iseqLabelPtr := r.rm.Ptr(iseqLocalBody +
+			iseqLabelPtr := r.rm.Ptr(iseqBody +
 				libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.label))
 			iseqLabel, err := r.getStringCached(iseqLabelPtr, r.readRubyString)
 			if err != nil {
@@ -1363,18 +1354,38 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 				log.Warnf("RubySymbolizer: Failed to get source base label (iseq@0x%08x) %v", iseqBody, err)
 			}
 
-			funcNamePtr := r.rm.Ptr(iseqLocalBody +
+			iseqBaseLabelPtr := r.rm.Ptr(iseqBody +
+				libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.label))
+			iseqBaseLabel, err := r.getStringCached(iseqBaseLabelPtr, r.readRubyString)
+			if err != nil {
+				iseqLabel = libpf.Intern("UNKNOWN_LABEL")
+				log.Warnf("RubySymbolizer: Failed to get source base label (iseq@0x%08x) %v", iseqBody, err)
+			}
+
+			// Body used for for qualified method label is indirect, need to do: iseq body -> local iseq -> iseq body
+			// https://github.com/ruby/ruby/blob/v3_4_5/vm_backtrace.c#L1943
+			// https://github.com/ruby/ruby/blob/v3_4_5/iseq.c#L1426
+			localIseqPtr, err := r.PtrCheck(iseqBody + libpf.Address(vms.iseq_constant_body.local_iseq))
+			if err != nil {
+				log.Errorf("Unable to dereference local iseq: %v", err)
+			}
+			iseqLocalBody, err := r.PtrCheck(localIseqPtr + libpf.Address(vms.iseq_struct.body))
+			if err != nil {
+				log.Errorf("Unable to dereference local iseq body: %v", err)
+			}
+			methodNamePtr := r.rm.Ptr(iseqLocalBody +
 				libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.base_label))
-			functionName, err := r.getStringCached(funcNamePtr, r.readRubyString)
+			methodName, err := r.getStringCached(methodNamePtr, r.readRubyString)
 			if err != nil {
 				// TODO maybe don't cache entries that are unknown, in case the lookup could succeed later?
-				functionName = libpf.Intern(fmt.Sprintf("UNKNOWN_FUNCTION %d %08x", frameAddrType, frame.Extra))
+				methodName = libpf.Intern(fmt.Sprintf("UNKNOWN_FUNCTION %d %08x", frameAddrType, frame.Extra))
 				log.Warnf("RubySymbolizer: Failed to get source function name (iseq@0x%08x) %v", iseqBody, err)
 			}
 
 			iseq = &rubyIseq{
-				functionName:   functionName,
+				functionName:   methodName,
 				label:          iseqLabel,
+				baseLabel:     iseqBaseLabel,
 				sourceFileName: sourceFileName,
 				line:           libpf.SourceLineno(lineNo),
 			}
@@ -1383,6 +1394,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		}
 		methodName = iseq.functionName
 		label = iseq.label
+		baseLabel = iseq.baseLabel
 		sourceFile = iseq.sourceFileName
 		sourceLine = iseq.line
 	}
@@ -1403,7 +1415,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 
 	// TODO we need to duplicate the exact logic of
 	// rb_profile_frame_full_label
-	fullLabel := profileFrameFullLabel(classPath, methodName, label, singleton, cframe)
+	fullLabel := profileFrameFullLabel(classPath, label, baseLabel, methodName, singleton, cframe)
 
 	// Ruby doesn't provide the information about the function offset for the
 	// particular line. So we report 0 for this to our backend.
@@ -1430,8 +1442,8 @@ func qualifiedMethodName(classPath, methodName libpf.String, singleton bool) lib
 }
 
 // TODO this should be saved in the cache, we shouldn't unconditionally run this
-func profileFrameFullLabel(classPath, baseLabel, label libpf.String, singleton, cframe bool) libpf.String {
-	qualified := qualifiedMethodName(classPath, baseLabel, singleton)
+func profileFrameFullLabel(classPath, label, baseLabel, methodName libpf.String, singleton, cframe bool) libpf.String {
+	qualified := qualifiedMethodName(classPath, methodName, singleton)
 
 	if cframe {
 		return qualified
