@@ -1203,12 +1203,104 @@ func processDied(frames *libpf.Frames) {
 	})
 }
 
+// Reconstructing (expanding back to 32 bits with 0xF fill)
+func unpackEnvFlags(packed uint16) uint32 {
+	// Extract the saved bytes
+	highByte := uint32((packed >> 8) & 0xFF) // Gets 0x22
+	lowByte := uint32(packed & 0xFF)         // Gets 0x02
+
+	// Reconstruct with pattern: 0xHH HH F LL F
+	// Where HH = highByte (repeated), LL = lowByte
+	reconstructed := (highByte << 24) | // 0x22000000
+		(highByte << 16) | // 0x00220000 (repeat high)
+		(0xF << 12) | // 0x0000F000
+		(lowByte << 4) | // 0x00000020
+		0xF // 0x0000000F
+
+	return reconstructed // 0x2222F02F
+}
+
+func (r *rubyInstance) readIseqBody(iseqBody, pc libpf.Address, frameAddrType uint8, frameFlags uint32) (*rubyIseq, error) {
+	vms := &r.r.vmStructs
+	if _, err := r.PtrCheck(iseqBody); err != nil && errors.Is(err, syscall.ESRCH) {
+		return nil, err
+	}
+	lineNo, err := r.getRubyLineNo(iseqBody, uint64(pc))
+	if err != nil {
+		lineNo = 0
+		log.Warnf("RubySymbolizer: Failed to get line number (%d) %v", frameAddrType, err)
+	}
+
+	// TODO PtrCheck for all of these reads, if they were supposed to succeed
+	// but the process died, mark that.
+	// For the string reads, on error, check the pointer is valid in case it died
+	sourceFileNamePtr := r.rm.Ptr(iseqBody +
+		libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.pathobj))
+	sourceFileName, err := r.getStringCached(sourceFileNamePtr, r.readPathObjRealPath)
+	if err != nil {
+		sourceFileName = libpf.Intern("UNKNOWN_FILE")
+		log.Warnf("RubySymbolizer: Failed to get source file name %v", err)
+	}
+
+	iseqLabelPtr := r.rm.Ptr(iseqBody +
+		libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.label))
+	iseqLabel, err := r.getStringCached(iseqLabelPtr, r.readRubyString)
+	if err != nil {
+		//iseqLabel = libpf.Intern("UNKNOWN_LABEL")
+		log.Warnf("RubySymbolizer: Failed to get source label (iseq@0x%08x) %d %08x, %v", iseqBody, frameAddrType, frameFlags, err)
+		return nil, err
+	}
+
+	iseqBaseLabelPtr := r.rm.Ptr(iseqBody +
+		libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.base_label))
+	iseqBaseLabel, err := r.getStringCached(iseqBaseLabelPtr, r.readRubyString)
+	if err != nil {
+		//iseqBaseLabel = libpf.Intern("UNKNOWN_LABEL")
+		log.Warnf("RubySymbolizer: Failed to get source base label (iseq@0x%08x) %d %08x, %v", iseqBody, frameAddrType, frameFlags, err)
+		return nil, err
+	}
+
+	// Body used for for qualified method label is indirect, need to do: iseq body -> local iseq -> iseq body
+	// https://github.com/ruby/ruby/blob/v3_4_5/vm_backtrace.c#L1943
+	// https://github.com/ruby/ruby/blob/v3_4_5/iseq.c#L1426
+	localIseqPtr, err := r.PtrCheck(iseqBody + libpf.Address(vms.iseq_constant_body.local_iseq))
+	if err != nil {
+		log.Errorf("Unable to dereference local iseq: %v", err)
+	}
+	iseqLocalBody, err := r.PtrCheck(localIseqPtr + libpf.Address(vms.iseq_struct.body))
+	if err != nil {
+		log.Errorf("Unable to dereference local iseq body: %v", err)
+	}
+
+	// Check iseq body type to see if it is a method
+	// https://github.com/ruby/ruby/blob/v3_4_5/iseq.c#L1428-L1430
+	iseqType := r.rm.Uint32(iseqLocalBody + libpf.Address(vms.iseq_constant_body.iseq_type))
+
+	var methodName libpf.String
+	if iseqType == iseqTypeMethod {
+		methodNamePtr := r.rm.Ptr(iseqLocalBody +
+			libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.base_label))
+		methodName, err = r.getStringCached(methodNamePtr, r.readRubyString)
+		if err != nil {
+			//methodName = libpf.Intern(fmt.Sprintf("UNKNOWN_FUNCTION %d %08x", frameAddrType, frame.Extra))
+			// TODO check if it is a block / block method before complaining here
+			log.Warnf("Unable to find local method name on iseq method (%d) (iseq@0x%08x) %v", iseqType, iseqBody, err)
+		}
+	}
+
+	return &rubyIseq{
+		functionName:   methodName,
+		label:          iseqLabel,
+		baseLabel:      iseqBaseLabel,
+		sourceFileName: sourceFileName,
+		line:           libpf.SourceLineno(lineNo),
+	}, nil
+}
+
 func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error {
 	if !frame.Type.IsInterpType(libpf.Ruby) {
 		return interpreter.ErrMismatchInterpreterType
 	}
-	vms := &r.r.vmStructs
-
 	sfCounter := successfailurecounter.New(&r.successCount, &r.failCount)
 	defer sfCounter.DefaultToFailure()
 
@@ -1229,11 +1321,14 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 
 	frameAddr := libpf.Address(frame.File & support.RubyAddrMask48Bit)
 	frameAddrType := uint8(frame.File >> 48)
+	pc := libpf.Address(frame.Lineno & support.RubyAddrMask48Bit)
 
+	frameFlags := unpackEnvFlags(uint16(frame.Lineno >> 48))
+
+	//log.Debugf("Extra %08x, flags %04x", frame.Extra, frameFlags)
 	switch frameAddrType {
 	case support.RubyFrameTypeCmeIseq, support.RubyFrameTypeCmeCfunc:
 		cme = frameAddr
-
 		var cmeHit bool
 		cmeEntry, cmeHit = r.cmeCache.Get(cme)
 		if !cmeHit {
@@ -1246,6 +1341,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 			cmeEntry = &rubyCme{}
 			//log.Debugf("Got ruby CME at 0x%08x", cme)
 			classPath, methodName, sourceFile, singleton, cframe, iseqBody, err = r.processCmeFrame(cme, frameAddrType)
+			log.Debugf("CME class %s", classPath.String())
 			if err != nil {
 				log.Errorf("Tried and failed to process as CME frame %v", err)
 			}
@@ -1308,13 +1404,12 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	}
 
 	if err != nil {
-		log.Errorf("Couldn't handle frame (%d) 0x%08x (pc: 0x%08x) as %d frame %08x %v", frameAddrType, frameAddr, frame.Lineno, frameAddrType, iseqBody, err)
+		log.Errorf("Couldn't handle frame (%d) (%04x) 0x%08x (pc: 0x%08x) as %d frame %08x %v", frameAddrType, frameFlags, frameAddr, pc, frameAddrType, iseqBody, err)
 	}
 
 	if methodName == libpf.NullString {
 		// The Ruby VM program counter that was extracted from the current call frame is embedded in
 		// the Linenos field.
-		pc := frame.Lineno
 
 		key := rubyIseqBodyPC{
 			addr: iseqBody,
@@ -1329,75 +1424,21 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 			ok = true
 		}
 		if !ok {
-			if _, err := r.PtrCheck(iseqBody); err != nil && errors.Is(err, syscall.ESRCH) {
-				processDied(frames)
-				// keep symbolizing in case other frames were cached
-				return nil
-			}
-			lineNo, err := r.getRubyLineNo(iseqBody, uint64(pc))
+			iseq, err = r.readIseqBody(iseqBody, pc, frameAddrType, frameFlags)
 			if err != nil {
-				lineNo = 0
-				log.Warnf("RubySymbolizer: Failed to get line number (%d) %v", frameAddrType, err)
-			}
-
-			sourceFileNamePtr := r.rm.Ptr(iseqBody +
-				libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.pathobj))
-			sourceFileName, err := r.getStringCached(sourceFileNamePtr, r.readPathObjRealPath)
-			if err != nil {
-				sourceFileName = libpf.Intern("UNKNOWN_FILE")
-				log.Warnf("RubySymbolizer: Failed to get source file name %v", err)
-			}
-
-			iseqLabelPtr := r.rm.Ptr(iseqBody +
-				libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.label))
-			iseqLabel, err := r.getStringCached(iseqLabelPtr, r.readRubyString)
-			if err != nil {
-				//iseqLabel = libpf.Intern("UNKNOWN_LABEL")
-				log.Warnf("RubySymbolizer: Failed to get source label (iseq@0x%08x) %d %08x, %v", iseqBody, frameAddrType, frame.Extra, err)
-			}
-
-			iseqBaseLabelPtr := r.rm.Ptr(iseqBody +
-				libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.base_label))
-			iseqBaseLabel, err := r.getStringCached(iseqBaseLabelPtr, r.readRubyString)
-			if err != nil {
-				//iseqBaseLabel = libpf.Intern("UNKNOWN_LABEL")
-				log.Warnf("RubySymbolizer: Failed to get source base label (iseq@0x%08x) %d %08x, %v", iseqBody, frameAddrType, frame.Extra, err)
-			}
-
-			// Body used for for qualified method label is indirect, need to do: iseq body -> local iseq -> iseq body
-			// https://github.com/ruby/ruby/blob/v3_4_5/vm_backtrace.c#L1943
-			// https://github.com/ruby/ruby/blob/v3_4_5/iseq.c#L1426
-			localIseqPtr, err := r.PtrCheck(iseqBody + libpf.Address(vms.iseq_constant_body.local_iseq))
-			if err != nil {
-				log.Errorf("Unable to dereference local iseq: %v", err)
-			}
-			iseqLocalBody, err := r.PtrCheck(localIseqPtr + libpf.Address(vms.iseq_struct.body))
-			if err != nil {
-				log.Errorf("Unable to dereference local iseq body: %v", err)
-			}
-
-			// Check iseq body type to see if it is a method
-			// https://github.com/ruby/ruby/blob/v3_4_5/iseq.c#L1428-L1430
-			iseqType := r.rm.Uint32(iseqLocalBody + libpf.Address(vms.iseq_constant_body.iseq_type))
-
-			if iseqType == iseqTypeMethod {
-				methodNamePtr := r.rm.Ptr(iseqLocalBody +
-					libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.base_label))
-				methodName, err = r.getStringCached(methodNamePtr, r.readRubyString)
-				if err != nil {
-					//methodName = libpf.Intern(fmt.Sprintf("UNKNOWN_FUNCTION %d %08x", frameAddrType, frame.Extra))
-					// TODO check if it is a block / block method before complaining here
-					log.Warnf("Unable to find local method name on iseq method (%d) (iseq@0x%08x) %v", iseqType, iseqBody, err)
+				if errors.Is(err, syscall.ESRCH) {
+					processDied(frames)
+					return nil
+				}
+				log.Debugf("iseq body read failed: %v", err)
+				if frameAddrType == support.RubyFrameTypeCmeIseq {
+					iseq, err = r.readIseqBody(libpf.Address(frame.Extra), pc, frameAddrType, frameFlags)
+					if err != nil {
+						log.Debugf("iseq read (attempt 2): %v", err)
+					}
 				}
 			}
 
-			iseq = &rubyIseq{
-				functionName:   methodName,
-				label:          iseqLabel,
-				baseLabel:      iseqBaseLabel,
-				sourceFileName: sourceFileName,
-				line:           libpf.SourceLineno(lineNo),
-			}
 			key.addr = iseqBody
 			r.iseqBodyPCToFunction.Add(key, iseq)
 		}
@@ -1427,7 +1468,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	fullLabel := profileFrameFullLabel(classPath, label, baseLabel, methodName, singleton, cframe)
 
 	if fullLabel == libpf.NullString {
-		fullLabel = libpf.Intern(fmt.Sprintf("UNKNOWN_FUNCTION %d %08x", frameAddrType, frame.Extra))
+		fullLabel = libpf.Intern(fmt.Sprintf("UNKNOWN_FUNCTION %d %08x", frameAddrType, frameFlags))
 	}
 	// Ruby doesn't provide the information about the function offset for the
 	// particular line. So we report 0 for this to our backend.

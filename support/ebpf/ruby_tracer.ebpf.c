@@ -44,7 +44,7 @@ bpf_map_def SEC("maps") ruby_procs = {
 
 // Record a Ruby cfp frame
 static EBPF_INLINE ErrorCode
-push_ruby_extra(Trace *trace, u8 frame_type, u64 file, u64 line, u64 iseq_addr)
+push_ruby_extra(Trace *trace, u16 flags, u8 frame_type, u64 file, u64 line, u64 iseq_addr)
 {
   if (frame_type != FRAME_TYPE_NONE) {
     // Ensure address is actually no more than 48-bits
@@ -55,6 +55,17 @@ push_ruby_extra(Trace *trace, u8 frame_type, u64 file, u64 line, u64 iseq_addr)
       // Shift data to bits 48-55
       u64 packed = addr | ((u64)frame_type << 48);
       file       = packed;
+    }
+  }
+
+  if (flags != 0) {
+    u64 pc_addr = line & ADDR_MASK_48_BIT;
+    if (pc_addr != line) {
+      DEBUG_PRINT("ruby: error pushing extra addr, line data was more than 48 bits");
+    } else {
+      // Shift data to bits 48-55
+      u64 packed = pc_addr | ((u64)flags << 48);
+      line       = packed;
     }
   }
   // DEBUG_PRINT("%llx", iseq_addr);
@@ -185,7 +196,7 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
   if (is_gc) {
     // GC is active - skip profiling
     DEBUG_PRINT("GC: is active, mode is %d", gc_mode);
-    ErrorCode error = push_ruby_extra(trace, FRAME_TYPE_GC, gc_mode, 0, 0);
+    ErrorCode error = push_ruby_extra(trace, 0, FRAME_TYPE_GC, gc_mode, 0, 0);
     if (error) {
       return error;
     }
@@ -239,8 +250,8 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
   // If we entered native unwinding because we saw a cfunc frame, lets push that
   // frame now so it can take "ownership" of the native code that was unwound
   if (record->rubyUnwindState.cfunc_saved_frame != 0) {
-    ErrorCode error =
-      push_ruby_extra(trace, FRAME_TYPE_CME_CFUNC, record->rubyUnwindState.cfunc_saved_frame, 0, 0);
+    ErrorCode error = push_ruby_extra(
+      trace, 0, FRAME_TYPE_CME_CFUNC, record->rubyUnwindState.cfunc_saved_frame, 0, 0);
     if (error) {
       DEBUG_PRINT("ruby: failed to push cframe");
       return error;
@@ -300,6 +311,12 @@ read_ep:
     frame_flags = (u64)vm_env.flags;
   }
   cfunc = (((frame_flags & VM_FRAME_MAGIC_MASK) == VM_FRAME_MAGIC_CFUNC) || pc == 0);
+
+  // Extract high byte (nibbles 6-7)
+  u16 high_byte    = (frame_flags >> 24) & 0xFF;
+  u16 low_byte     = (frame_flags >> 4) & 0xFF;
+  // Extract nibbles 1-2 (middle of lower 16 bits)
+  u16 packed_flags = (high_byte << 8) | low_byte;
 
 check_me:
   DEBUG_PRINT("ruby: checking %llx", me_or_cref);
@@ -404,9 +421,19 @@ done_check:
       }
 
       method_type &= 0xf;
-      DEBUG_PRINT("ruby: method type %d", method_type);
+      // DEBUG_PRINT("ruby: method type %d", method_type);
       if (method_type == VM_METHOD_TYPE_ISEQ) {
         frame_type = FRAME_TYPE_CME_ISEQ;
+
+        // Store the iseq body in extra_addr as a fallback
+        if (control_frame.iseq != NULL) {
+          if (bpf_probe_read_user(
+                &extra_addr, sizeof(extra_addr), (void *)(control_frame.iseq + rubyinfo->body))) {
+            DEBUG_PRINT("ruby: failed to get iseq body");
+            increment_metric(metricID_UnwindRubyErrReadIseqBody);
+            return ERR_RUBY_READ_ISEQ_BODY;
+          }
+        }
       }
     }
   }
@@ -441,22 +468,18 @@ done_check:
       // NB: with ruby jit perf maps on (even without base pointer, so low perf impact)
       // we should be able to further symbolize this frame, the format is simple
       // https://github.com/torvalds/linux/blob/master/tools/perf/Documentation/jit-interface.txt
-      ErrorCode error = push_ruby_extra(trace, FRAME_TYPE_JIT, (u64)record->state.pc, 0, 0);
+      ErrorCode error =
+        push_ruby_extra(trace, frame_flags, FRAME_TYPE_JIT, (u64)record->state.pc, 0, 0);
       if (error) {
         return error;
       }
     }
   }
 
-  // TODO toggle this with a debug macro, it is useful for figuring out why a frame
-  // may not have rendered, but i don't want to commit to making it part of the API
-  // given how few bits we have available to us in the Frame struct
-  extra_addr = frame_flags;
-
   // For symbolization of the frame we forward the information about the instruction sequence
   // and program counter to user space.
   // From this we can then extract information like file or function name and line number.
-  ErrorCode error = push_ruby_extra(trace, frame_type, frame_addr, pc, extra_addr);
+  ErrorCode error = push_ruby_extra(trace, packed_flags, frame_type, frame_addr, pc, extra_addr);
   if (error) {
     DEBUG_PRINT("ruby: failed to push frame");
     return error;
