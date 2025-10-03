@@ -1334,6 +1334,9 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 				log.Warnf("RubySymbolizer: Failed to get line number (%d) %v", frameAddrType, err)
 			}
 
+			// Body used for label is indirect, need to do: iseq body -> local iseq -> iseq body
+			// https://github.com/ruby/ruby/blob/v3_4_5/vm_backtrace.c#L1943
+			// https://github.com/ruby/ruby/blob/v3_4_5/iseq.c#L1426
 			localIseqPtr, err := r.PtrCheck(iseqBody + libpf.Address(vms.iseq_constant_body.local_iseq))
 			if err != nil {
 				log.Errorf("Unable to dereference local iseq: %v")
