@@ -411,13 +411,21 @@ done_check:
     } else {
       // Now we must further verify that it is ISEQ type, but do it out of the loop
       // https://github.com/ruby/ruby/blob/v3_4_5/vm_backtrace.c#L1736
+      u64 method_def = 0;
       u8 method_type = 0;
 
       if (bpf_probe_read_user(
-            &method_type, sizeof(method_type), (void *)(frame_addr + rubyinfo->cme_method_def))) {
+            &method_def, sizeof(method_def), (void *)(frame_addr + rubyinfo->cme_method_def))) {
+        DEBUG_PRINT("ruby: failed to get method def");
+        // increment_metric(metricID_UnwindRubyErrReadIseqBody);
+        // return ERR_RUBY_READ_ISEQ_BODY;
+        return -1;
+      }
+
+      if (bpf_probe_read_user(&method_type, sizeof(method_type), (void *)(method_def))) {
         DEBUG_PRINT("ruby: failed to get method def type body");
         increment_metric(metricID_UnwindRubyErrReadIseqBody);
-        return ERR_RUBY_READ_ISEQ_BODY;
+        return -1;
       }
 
       method_type &= 0xf;
@@ -425,14 +433,23 @@ done_check:
       if (method_type == VM_METHOD_TYPE_ISEQ) {
         frame_type = FRAME_TYPE_CME_ISEQ;
 
-        // Store the iseq body in extra_addr as a fallback
-        if (control_frame.iseq != NULL) {
-          if (bpf_probe_read_user(
-                &extra_addr, sizeof(extra_addr), (void *)(control_frame.iseq + rubyinfo->body))) {
-            DEBUG_PRINT("ruby: failed to get iseq body");
-            increment_metric(metricID_UnwindRubyErrReadIseqBody);
-            return ERR_RUBY_READ_ISEQ_BODY;
-          }
+        u64 method_body = 0;
+        if (bpf_probe_read_user(
+              &method_body,
+              sizeof(method_body),
+              (void *)(method_def + 8))) { // TODO plumb this through rubyproc
+          DEBUG_PRINT("ruby: failed to get method body");
+          increment_metric(metricID_UnwindRubyErrReadIseqBody);
+          // return ERR_RUBY_READ_ISEQ_BODY;
+          //  FIXME
+          return -1;
+        }
+
+        if (bpf_probe_read_user(
+              &extra_addr, sizeof(extra_addr), (void *)(method_body + rubyinfo->body))) {
+          DEBUG_PRINT("ruby: failed to get iseq body");
+          increment_metric(metricID_UnwindRubyErrReadIseqBody);
+          return ERR_RUBY_READ_ISEQ_BODY;
         }
       }
     }

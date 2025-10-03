@@ -1248,7 +1248,7 @@ func (r *rubyInstance) readIseqBody(iseqBody, pc libpf.Address, frameAddrType ui
 	if err != nil {
 		//iseqLabel = libpf.Intern("UNKNOWN_LABEL")
 		log.Warnf("RubySymbolizer: Failed to get source label (iseq@0x%08x) %d %08x, %v", iseqBody, frameAddrType, frameFlags, err)
-		return &iseqBody{}, err
+		return &rubyIseq{}, err
 	}
 
 	iseqBaseLabelPtr := r.rm.Ptr(iseqBody +
@@ -1257,7 +1257,7 @@ func (r *rubyInstance) readIseqBody(iseqBody, pc libpf.Address, frameAddrType ui
 	if err != nil {
 		//iseqBaseLabel = libpf.Intern("UNKNOWN_LABEL")
 		log.Warnf("RubySymbolizer: Failed to get source base label (iseq@0x%08x) %d %08x, %v", iseqBody, frameAddrType, frameFlags, err)
-		return &iseqBody{}, err
+		return &rubyIseq{}, err
 	}
 
 	// Body used for for qualified method label is indirect, need to do: iseq body -> local iseq -> iseq body
