@@ -54,7 +54,6 @@ const (
 
 //nolint:lll
 const (
-
 	//RUBY_T_CLASS
 	rubyTClass = 0x2
 	//https://github.com/ruby/ruby/blob/c149708018135595b2c19c5f74baf9475674f394/include/ruby/internal/value_type.h#L114
@@ -90,6 +89,10 @@ const (
 
 	// PATHOBJ_REALPATH
 	pathObjRealPathIdx = 1
+
+	// ISEQ_TYPE_METHOD
+	// https://github.com/ruby/ruby/blob/v3_4_5/vm_core.h#L380
+	iseqTypeMethod = 1
 )
 
 const (
@@ -1337,7 +1340,6 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 				log.Warnf("RubySymbolizer: Failed to get line number (%d) %v", frameAddrType, err)
 			}
 
-
 			sourceFileNamePtr := r.rm.Ptr(iseqBody +
 				libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.pathobj))
 			sourceFileName, err := r.getStringCached(sourceFileNamePtr, r.readPathObjRealPath)
@@ -1350,16 +1352,16 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 				libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.label))
 			iseqLabel, err := r.getStringCached(iseqLabelPtr, r.readRubyString)
 			if err != nil {
-				iseqLabel = libpf.Intern("UNKNOWN_LABEL")
-				log.Warnf("RubySymbolizer: Failed to get source base label (iseq@0x%08x) %v", iseqBody, err)
+				//iseqLabel = libpf.Intern("UNKNOWN_LABEL")
+				log.Warnf("RubySymbolizer: Failed to get source label (iseq@0x%08x) %d %08x, %v", iseqBody, frameAddrType, frame.Extra, err)
 			}
 
 			iseqBaseLabelPtr := r.rm.Ptr(iseqBody +
-				libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.label))
+				libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.base_label))
 			iseqBaseLabel, err := r.getStringCached(iseqBaseLabelPtr, r.readRubyString)
 			if err != nil {
-				iseqLabel = libpf.Intern("UNKNOWN_LABEL")
-				log.Warnf("RubySymbolizer: Failed to get source base label (iseq@0x%08x) %v", iseqBody, err)
+				//iseqBaseLabel = libpf.Intern("UNKNOWN_LABEL")
+				log.Warnf("RubySymbolizer: Failed to get source base label (iseq@0x%08x) %d %08x, %v", iseqBody, frameAddrType, frame.Extra, err)
 			}
 
 			// Body used for for qualified method label is indirect, need to do: iseq body -> local iseq -> iseq body
@@ -1373,19 +1375,26 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 			if err != nil {
 				log.Errorf("Unable to dereference local iseq body: %v", err)
 			}
-			methodNamePtr := r.rm.Ptr(iseqLocalBody +
-				libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.base_label))
-			methodName, err := r.getStringCached(methodNamePtr, r.readRubyString)
-			if err != nil {
-				// TODO maybe don't cache entries that are unknown, in case the lookup could succeed later?
-				methodName = libpf.Intern(fmt.Sprintf("UNKNOWN_FUNCTION %d %08x", frameAddrType, frame.Extra))
-				log.Warnf("RubySymbolizer: Failed to get source function name (iseq@0x%08x) %v", iseqBody, err)
+
+			// Check iseq body type to see if it is a method
+			// https://github.com/ruby/ruby/blob/v3_4_5/iseq.c#L1428-L1430
+			iseqType := r.rm.Uint32(iseqLocalBody + libpf.Address(vms.iseq_constant_body.iseq_type))
+
+			if iseqType == iseqTypeMethod {
+				methodNamePtr := r.rm.Ptr(iseqLocalBody +
+					libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.base_label))
+				methodName, err = r.getStringCached(methodNamePtr, r.readRubyString)
+				if err != nil {
+					//methodName = libpf.Intern(fmt.Sprintf("UNKNOWN_FUNCTION %d %08x", frameAddrType, frame.Extra))
+					// TODO check if it is a block / block method before complaining here
+					log.Warnf("Unable to find local method name on iseq method (%d) (iseq@0x%08x) %v", iseqType, iseqBody, err)
+				}
 			}
 
 			iseq = &rubyIseq{
 				functionName:   methodName,
 				label:          iseqLabel,
-				baseLabel:     iseqBaseLabel,
+				baseLabel:      iseqBaseLabel,
 				sourceFileName: sourceFileName,
 				line:           libpf.SourceLineno(lineNo),
 			}
@@ -1417,6 +1426,9 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	// rb_profile_frame_full_label
 	fullLabel := profileFrameFullLabel(classPath, label, baseLabel, methodName, singleton, cframe)
 
+	if fullLabel == libpf.NullString {
+		fullLabel = libpf.Intern(fmt.Sprintf("UNKNOWN_FUNCTION %d %08x", frameAddrType, frame.Extra))
+	}
 	// Ruby doesn't provide the information about the function offset for the
 	// particular line. So we report 0 for this to our backend.
 	frames.Append(&libpf.Frame{
@@ -1430,6 +1442,9 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 }
 
 func qualifiedMethodName(classPath, methodName libpf.String, singleton bool) libpf.String {
+	if methodName == libpf.NullString {
+		return methodName
+	}
 	if classPath != libpf.NullString {
 		joinChar := "#"
 		if singleton {
@@ -1441,6 +1456,8 @@ func qualifiedMethodName(classPath, methodName libpf.String, singleton bool) lib
 	return methodName
 }
 
+// TODO make some tests for profileFullLabelName to cover the various cases it needs
+// to handle correctly
 // TODO this should be saved in the cache, we shouldn't unconditionally run this
 func profileFrameFullLabel(classPath, label, baseLabel, methodName libpf.String, singleton, cframe bool) libpf.String {
 	qualified := qualifiedMethodName(classPath, methodName, singleton)
@@ -1457,10 +1474,6 @@ func profileFrameFullLabel(classPath, label, baseLabel, methodName libpf.String,
 	baseLabelLength := len(baseLabel.String())
 	prefixLen := labelLength - baseLabelLength
 
-	//log.Debugf("label: %s", label.String())
-	//log.Debugf("base_label: %s", baseLabel.String())
-	//log.Debugf("qualified: %s", qualified.String())
-
 	// Ensure prefixLen doesn't exceed label length (defensive programming)
 	if prefixLen < 0 {
 		prefixLen = 0
@@ -1470,8 +1483,19 @@ func profileFrameFullLabel(classPath, label, baseLabel, methodName libpf.String,
 		prefixLen = labelLength
 	}
 
+	profileLabel := label.String()[:prefixLen] + qualified.String()
+
+	log.Debugf("label: %s", label.String())
+	log.Debugf("base_label: %s", baseLabel.String())
+	log.Debugf("qualified: %s", qualified.String())
+	log.Debugf("profile label: %s", profileLabel)
+
+	if len(profileLabel) == 0 {
+		return libpf.NullString
+	}
+
 	// Get the prefix from label and concatenate with qualifiedMethodName
-	return libpf.Intern(label.String()[:prefixLen] + qualified.String())
+	return libpf.Intern(profileLabel)
 }
 
 func (r *rubyInstance) GetAndResetMetrics() ([]metrics.Metric, error) {
