@@ -1242,8 +1242,11 @@ func (r *rubyInstance) readIseqBody(iseqBody, pc libpf.Address, frameAddrType ui
 		log.Warnf("RubySymbolizer: Failed to get source file name %v", err)
 	}
 
-	iseqLabelPtr := r.rm.Ptr(iseqBody +
+	iseqLabelPtr, err := r.PtrCheck(iseqBody +
 		libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.label))
+	if err != nil && errors.Is(err, syscall.ESRCH) {
+		return nil, err
+	}
 	iseqLabel, err := r.getStringCached(iseqLabelPtr, r.readRubyString)
 	if err != nil {
 		//iseqLabel = libpf.Intern("UNKNOWN_LABEL")
@@ -1251,8 +1254,11 @@ func (r *rubyInstance) readIseqBody(iseqBody, pc libpf.Address, frameAddrType ui
 		return &rubyIseq{}, err
 	}
 
-	iseqBaseLabelPtr := r.rm.Ptr(iseqBody +
+	iseqBaseLabelPtr, err := r.PtrCheck(iseqBody +
 		libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.base_label))
+	if err != nil && errors.Is(err, syscall.ESRCH) {
+		return nil, err
+	}
 	iseqBaseLabel, err := r.getStringCached(iseqBaseLabelPtr, r.readRubyString)
 	if err != nil {
 		//iseqBaseLabel = libpf.Intern("UNKNOWN_LABEL")
@@ -1265,10 +1271,16 @@ func (r *rubyInstance) readIseqBody(iseqBody, pc libpf.Address, frameAddrType ui
 	// https://github.com/ruby/ruby/blob/v3_4_5/iseq.c#L1426
 	localIseqPtr, err := r.PtrCheck(iseqBody + libpf.Address(vms.iseq_constant_body.local_iseq))
 	if err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return nil, err
+		}
 		log.Errorf("Unable to dereference local iseq: %v", err)
 	}
 	iseqLocalBody, err := r.PtrCheck(localIseqPtr + libpf.Address(vms.iseq_struct.body))
 	if err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return nil, err
+		}
 		log.Errorf("Unable to dereference local iseq body: %v", err)
 	}
 
@@ -1278,8 +1290,11 @@ func (r *rubyInstance) readIseqBody(iseqBody, pc libpf.Address, frameAddrType ui
 
 	var methodName libpf.String
 	if iseqType == iseqTypeMethod {
-		methodNamePtr := r.rm.Ptr(iseqLocalBody +
+		methodNamePtr, err := r.PtrCheck(iseqLocalBody +
 			libpf.Address(vms.iseq_constant_body.location+vms.iseq_location_struct.base_label))
+		if err != nil && errors.Is(err, syscall.ESRCH) {
+			return nil, err
+		}
 		methodName, err = r.getStringCached(methodNamePtr, r.readRubyString)
 		if err != nil {
 			//methodName = libpf.Intern(fmt.Sprintf("UNKNOWN_FUNCTION %d %08x", frameAddrType, frame.Extra))
@@ -1341,9 +1356,12 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 			cmeEntry = &rubyCme{}
 			//log.Debugf("Got ruby CME at 0x%08x", cme)
 			classPath, methodName, sourceFile, singleton, cframe, iseqBody, err = r.processCmeFrame(cme, frameAddrType)
-			log.Debugf("CME class %s", classPath.String())
 			if err != nil {
 				log.Errorf("Tried and failed to process as CME frame %v", err)
+			}
+			if frameAddrType == support.RubyFrameTypeCmeIseq && iseqBody != libpf.Address(frame.Extra) {
+				log.Debugf("Mismatched iseq body addrs %04X %08X %08X, preferring BPF", frameFlags, iseqBody, frame.Extra)
+				iseqBody = libpf.Address(frame.Extra)
 			}
 		} else {
 			classPath = cmeEntry.classPath
