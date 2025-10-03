@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"math/bits"
+	"os"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -135,15 +136,15 @@ var (
 	// regex to extract a version from a string
 	rubyVersionRegex = regexp.MustCompile(`^(\d)\.(\d)\.(\d)$`)
 
-	rubyProcessDied  = libpf.Intern("PROCESS_DIED")
-	rubyDeadFile     = libpf.Intern("<dead>")
-	rubyJitFrame     = libpf.Intern("JIT")
-	rubyJitDummyFile = libpf.Intern("<jitted code>")
-	rubyGcRunning    = libpf.Intern("GC_RUNNING")
-	rubyGcMarking    = libpf.Intern("GC_MARKING")
-	rubyGcSweeping   = libpf.Intern("GC_SWEEPING")
-	rubyGcCompacting = libpf.Intern("GC_COMPACTING")
-	rubyGcDummyFile  = libpf.Intern("gc.c")
+	rubyProcessDied   = libpf.Intern("PROCESS_DIED")
+	rubyDeadFile      = libpf.Intern("<dead>")
+	rubyJitDummyFrame = libpf.Intern("UNKNOWN JIT CODE")
+	rubyJitDummyFile  = libpf.Intern("<jitted code>")
+	rubyGcRunning     = libpf.Intern("GC_RUNNING")
+	rubyGcMarking     = libpf.Intern("GC_MARKING")
+	rubyGcSweeping    = libpf.Intern("GC_SWEEPING")
+	rubyGcCompacting  = libpf.Intern("GC_COMPACTING")
+	rubyGcDummyFile   = libpf.Intern("gc.c")
 
 	// compiler check to make sure the needed interfaces are satisfied
 	_ interpreter.Data     = &rubyData{}
@@ -347,7 +348,7 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 		Ep:                           r.vmStructs.control_frame_struct.ep,
 		Size_of_control_frame_struct: r.vmStructs.control_frame_struct.size_of_control_frame_struct,
 
-		Body: r.vmStructs.iseq_struct.body,
+		Body:           r.vmStructs.iseq_struct.body,
 		Cme_method_def: r.vmStructs.rb_method_entry_struct.def,
 
 		Size_of_value: r.vmStructs.size_of_value,
@@ -465,7 +466,7 @@ type rubyInstance struct {
 	r  *rubyData
 	rm remotememory.RemoteMemory
 
-	procInfo support.RubyProcInfo
+	procInfo          support.RubyProcInfo
 	globalSymbolsAddr libpf.Address
 	// iseqBodyPCToFunction maps an address and Ruby VM program counter combination to extracted
 	// information from a Ruby instruction sequence object.
@@ -474,6 +475,8 @@ type rubyInstance struct {
 	// cmeCache maps a CME address to the symbolized info
 	cmeCache *freelru.LRU[libpf.Address, *rubyCme]
 
+	// Ruby JIT mappings
+	jitMap *PerfMap
 	// addrToString maps an address to an extracted Ruby String from this address.
 	addrToString *freelru.LRU[libpf.Address, libpf.String]
 
@@ -1028,7 +1031,7 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, cmeFrameType uint8
 	vms := &r.r.vmStructs
 	//log.Debugf("Got Ruby CME frame %X", cmeAddr)
 
-	methodDefinition, err := r.PtrCheck(cmeAddr + libpf.Address(vms.rb_method_entry_struct.def)) 
+	methodDefinition, err := r.PtrCheck(cmeAddr + libpf.Address(vms.rb_method_entry_struct.def))
 	if err != nil {
 		return libpf.NullString, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, fmt.Errorf("Unable to read method definition, CME (%08x) %v", cmeAddr, err)
 	}
@@ -1054,14 +1057,14 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, cmeFrameType uint8
 		// We do a direct read, as a value of 0 would be mistaken for ISEQ type
 		var buf [1]byte
 		if r.rm.Read(methodDefinition+libpf.Address(vms.rb_method_definition_struct.method_type), buf[:]) != nil {
-		        return libpf.NullString, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, fmt.Errorf("Unable to read method type, CME (%08x) is corrupt, method def %08X", cmeAddr, methodDefinition)
+			return libpf.NullString, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, fmt.Errorf("Unable to read method type, CME (%08x) is corrupt, method def %08X", cmeAddr, methodDefinition)
 		}
-		
+
 		// NOTE - it is stored in a bitfield of size 4, so we must mask with 0xF
 		// https://github.com/ruby/ruby/blob/5e817f98af9024f34a3491c0aa6526d1191f8c11/method.h#L188
 		methodType := buf[0] & 0xF
 		log.Debugf("Method type %x", methodType)
-	
+
 		classDefinition := r.rm.Ptr(cmeAddr + libpf.Address(vms.rb_method_entry_struct.defined_class))
 		classPath, singleton, err = r.readClassName(classDefinition)
 		if err != nil {
@@ -1147,7 +1150,24 @@ func (r *rubyInstance) SynchronizeMappings(ebpf interpreter.EbpfHandler,
 		if err := ebpf.UpdateProcData(libpf.Ruby, pr.PID(), unsafe.Pointer(&r.procInfo)); err != nil {
 			return err
 		}
-		log.Debugf("Added jit mapping %08x ruby prof info, %08x", r.procInfo.Jit_start, r.procInfo.Jit_end)
+		log.Debugf("Added jit mapping %08x ruby proc info, %08x", r.procInfo.Jit_start, r.procInfo.Jit_end)
+
+		if r.jitMap == nil {
+			// Check for jit interface here, store the path to the file so we can
+			// lookup the jit PCs rather than push a dummy frame
+			jitFile := fmt.Sprintf("/tmp/perf-%d.map", pr.PID())
+			if _, err := os.Stat(jitFile); err != nil {
+				log.Warnf("Jit mapping not found for ruby process at %s", jitFile)
+			} else {
+				perfMap := NewPerfMap()
+				if err := perfMap.ParseFile(jitFile); err != nil {
+					log.Errorf("Unable to parse perf map at %s, %v", jitFile, err)
+				} else {
+					log.Debugf("Loaded perf map from %s, stats: %s", jitFile, perfMap.Stats())
+					r.jitMap = perfMap
+				}
+			}
+		}
 	}
 	// Remove prefixes not seen
 	for prefix, generationPtr := range r.prefixes {
@@ -1255,9 +1275,24 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		})
 		return nil
 	case support.RubyFrameTypeJit:
+		label := rubyJitDummyFrame
+		if r.jitMap != nil {
+			jitSymbol, ok, err := r.jitMap.LookupWithReload(uint64(frameAddr))
+			if err != nil {
+				log.Errorf("Error loading looking up jit symbol for PC %08X: %v", frameAddr, err)
+			}
+			if !ok {
+				log.Warnf("JIT: Unable to lookup PC %08x, map stats: %s", frameAddr, r.jitMap.Stats())
+			} else {
+				log.Debugf("Found JIT symbol %s for PC %08X", jitSymbol.Name, frameAddr)
+				label = libpf.Intern(jitSymbol.Name)
+			}
+		} else {
+			log.Warnf("JIT: unable to symbolize, no jit mapping loaded")
+		}
 		frames.Append(&libpf.Frame{
 			Type:         libpf.RubyFrame,
-			FunctionName: rubyJitFrame,
+			FunctionName: label,
 			SourceFile:   rubyJitDummyFile,
 			SourceLine:   0,
 		})
