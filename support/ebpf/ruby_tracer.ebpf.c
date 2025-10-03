@@ -433,24 +433,24 @@ done_check:
       if (method_type == VM_METHOD_TYPE_ISEQ) {
         frame_type = FRAME_TYPE_CME_ISEQ;
 
-        u64 method_body = 0;
-        if (bpf_probe_read_user(
-              &method_body,
-              sizeof(method_body),
-              (void *)(method_def + 8))) { // TODO plumb this through rubyproc
-          DEBUG_PRINT("ruby: failed to get method body");
-          increment_metric(metricID_UnwindRubyErrReadIseqBody);
-          // return ERR_RUBY_READ_ISEQ_BODY;
-          //  FIXME
-          return -1;
-        }
+        //u64 method_body = 0;
+        //if (bpf_probe_read_user(
+        //      &method_body,
+        //      sizeof(method_body),
+        //      (void *)(method_def + 8))) { // TODO plumb this through rubyproc
+        //  DEBUG_PRINT("ruby: failed to get method body");
+        //  increment_metric(metricID_UnwindRubyErrReadIseqBody);
+        //  // return ERR_RUBY_READ_ISEQ_BODY;
+        //  //  FIXME
+        //  return -1;
+        //}
 
-        if (bpf_probe_read_user(
-              &extra_addr, sizeof(extra_addr), (void *)(method_body + rubyinfo->body))) {
-          DEBUG_PRINT("ruby: failed to get iseq body");
-          increment_metric(metricID_UnwindRubyErrReadIseqBody);
-          return ERR_RUBY_READ_ISEQ_BODY;
-        }
+        //if (bpf_probe_read_user(
+        //      &extra_addr, sizeof(extra_addr), (void *)(method_body + rubyinfo->body))) {
+        //  DEBUG_PRINT("ruby: failed to get iseq body");
+        //  increment_metric(metricID_UnwindRubyErrReadIseqBody);
+        //  return ERR_RUBY_READ_ISEQ_BODY;
+        //}
       }
     }
   }

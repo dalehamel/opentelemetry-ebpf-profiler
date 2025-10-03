@@ -41,7 +41,7 @@ import (
 const (
 	// iseqCacheSize is the LRU size for caching Ruby instruction sequences for an interpreter.
 	// This should reflect the number of hot functions that are seen often in a trace.
-	iseqCacheSize = 8192
+	iseqCacheSize = 1024
 	// cmeCacheSize
 	cmeCacheSize = 8192
 	// addrToStringSize is the LRU size for caching Ruby VM addresses to Ruby strings.
@@ -1359,10 +1359,10 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 			if err != nil {
 				log.Errorf("Tried and failed to process as CME frame %v", err)
 			}
-			if frameAddrType == support.RubyFrameTypeCmeIseq && iseqBody != libpf.Address(frame.Extra) {
-				log.Debugf("Mismatched iseq body addrs %04X %08X %08X, preferring BPF", frameFlags, iseqBody, frame.Extra)
-				iseqBody = libpf.Address(frame.Extra)
-			}
+			//if frameAddrType == support.RubyFrameTypeCmeIseq && iseqBody != libpf.Address(frame.Extra) {
+			//	log.Debugf("Mismatched iseq body addrs %04X %08X %08X, preferring BPF", frameFlags, iseqBody, frame.Extra)
+			//	iseqBody = libpf.Address(frame.Extra)
+			//}
 		} else {
 			classPath = cmeEntry.classPath
 			methodName = cmeEntry.methodName
@@ -1455,10 +1455,10 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 				//		log.Debugf("iseq read (attempt 2): %v", err)
 				//	}
 				//}
+			} else {
+				key.addr = iseqBody
+				r.iseqBodyPCToFunction.Add(key, iseq)
 			}
-
-			key.addr = iseqBody
-			r.iseqBodyPCToFunction.Add(key, iseq)
 		}
 		methodName = iseq.functionName
 		label = iseq.label
