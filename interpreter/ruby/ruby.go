@@ -1248,7 +1248,7 @@ func (r *rubyInstance) readIseqBody(iseqBody, pc libpf.Address, frameAddrType ui
 	if err != nil {
 		//iseqLabel = libpf.Intern("UNKNOWN_LABEL")
 		log.Warnf("RubySymbolizer: Failed to get source label (iseq@0x%08x) %d %08x, %v", iseqBody, frameAddrType, frameFlags, err)
-		return nil, err
+		return &iseqBody{}, err
 	}
 
 	iseqBaseLabelPtr := r.rm.Ptr(iseqBody +
@@ -1257,7 +1257,7 @@ func (r *rubyInstance) readIseqBody(iseqBody, pc libpf.Address, frameAddrType ui
 	if err != nil {
 		//iseqBaseLabel = libpf.Intern("UNKNOWN_LABEL")
 		log.Warnf("RubySymbolizer: Failed to get source base label (iseq@0x%08x) %d %08x, %v", iseqBody, frameAddrType, frameFlags, err)
-		return nil, err
+		return &iseqBody{}, err
 	}
 
 	// Body used for for qualified method label is indirect, need to do: iseq body -> local iseq -> iseq body
@@ -1431,12 +1431,12 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 					return nil
 				}
 				log.Debugf("iseq body read failed: %v", err)
-				if frameAddrType == support.RubyFrameTypeCmeIseq {
-					iseq, err = r.readIseqBody(libpf.Address(frame.Extra), pc, frameAddrType, frameFlags)
-					if err != nil {
-						log.Debugf("iseq read (attempt 2): %v", err)
-					}
-				}
+				//if frameAddrType == support.RubyFrameTypeCmeIseq {
+				//	iseq, err = r.readIseqBody(libpf.Address(frame.Extra), pc, frameAddrType, frameFlags)
+				//	if err != nil {
+				//		log.Debugf("iseq read (attempt 2): %v", err)
+				//	}
+				//}
 			}
 
 			key.addr = iseqBody
@@ -1526,10 +1526,10 @@ func profileFrameFullLabel(classPath, label, baseLabel, methodName libpf.String,
 
 	profileLabel := label.String()[:prefixLen] + qualified.String()
 
-	log.Debugf("label: %s", label.String())
-	log.Debugf("base_label: %s", baseLabel.String())
-	log.Debugf("qualified: %s", qualified.String())
-	log.Debugf("profile label: %s", profileLabel)
+	//log.Debugf("label: %s", label.String())
+	//log.Debugf("base_label: %s", baseLabel.String())
+	//log.Debugf("qualified: %s", qualified.String())
+	//log.Debugf("profile label: %s", profileLabel)
 
 	if len(profileLabel) == 0 {
 		return libpf.NullString
