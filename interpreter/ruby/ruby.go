@@ -1144,7 +1144,7 @@ func (r *rubyInstance) SynchronizeMappings(ebpf interpreter.EbpfHandler,
 			r.prefixes[prefix] = &mappingGeneration
 		}
 	}
-	if jitMapping != nil {
+	if jitMapping != nil && (r.procInfo.Jit_start != jitMapping.Vaddr || r.procInfo.Jit_end != jitMapping.Vaddr+jitMapping.Length) {
 		r.procInfo.Jit_start = jitMapping.Vaddr
 		r.procInfo.Jit_end = jitMapping.Vaddr + jitMapping.Length
 		if err := ebpf.UpdateProcData(libpf.Ruby, pr.PID(), unsafe.Pointer(&r.procInfo)); err != nil {
