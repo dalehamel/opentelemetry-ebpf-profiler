@@ -1061,8 +1061,8 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, cmeFrameType uint8
 		// TODO delete me, we should trust the values from BPF
 		// We do a direct read, as a value of 0 would be mistaken for ISEQ type
 		var buf [1]byte
-		if r.rm.Read(methodDefinition+libpf.Address(vms.rb_method_definition_struct.method_type), buf[:]) != nil {
-			return libpf.NullString, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, fmt.Errorf("Unable to read method type, CME (%08x) is corrupt, method def %08X", cmeAddr, methodDefinition)
+		if err := r.rm.Read(methodDefinition+libpf.Address(vms.rb_method_definition_struct.method_type), buf[:]); err != nil {
+			return libpf.NullString, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, fmt.Errorf("Unable to read method type, CME (%08x) is corrupt, method def %08X, %v", cmeAddr, methodDefinition, err)
 		}
 
 		// NOTE - it is stored in a bitfield of size 4, so we must mask with 0xF
@@ -1429,19 +1429,19 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		// The Ruby VM program counter that was extracted from the current call frame is embedded in
 		// the Linenos field.
 
-		key := rubyIseqBodyPC{
-			addr: iseqBody,
-			pc:   uint64(pc),
-		}
+		//key := rubyIseqBodyPC{
+		//	addr: iseqBody,
+		//	pc:   uint64(pc),
+		//}
 
-		var ok bool
+		//var ok bool
 
 		if iseq == nil {
-			iseq, ok = r.iseqBodyPCToFunction.Get(key)
-		} else {
-			ok = true
-		}
-		if !ok {
+		//	iseq, ok = r.iseqBodyPCToFunction.Get(key)
+		//} else {
+		//	ok = true
+		//}
+		//if !ok {
 			iseq, err = r.readIseqBody(iseqBody, pc, frameAddrType, frameFlags)
 			if err != nil {
 				if errors.Is(err, syscall.ESRCH) {
@@ -1455,10 +1455,10 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 				//		log.Debugf("iseq read (attempt 2): %v", err)
 				//	}
 				//}
-			} else {
-				key.addr = iseqBody
-				r.iseqBodyPCToFunction.Add(key, iseq)
-			}
+			}// else {
+			//	key.addr = iseqBody
+			//	r.iseqBodyPCToFunction.Add(key, iseq)
+			//}
 		}
 		methodName = iseq.functionName
 		label = iseq.label
