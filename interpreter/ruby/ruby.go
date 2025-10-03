@@ -1340,11 +1340,9 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 
 	frameFlags := unpackEnvFlags(uint16(frame.Lineno >> 48))
 
-	//log.Debugf("Extra %08x, flags %04x", frame.Extra, frameFlags)
 	switch frameAddrType {
 	case support.RubyFrameTypeCmeIseq, support.RubyFrameTypeCmeCfunc:
 		cme = frameAddr
-		var cmeHit bool
 		cmeEntry, cmeHit = r.cmeCache.Get(cme)
 		if !cmeHit {
 			if _, err := r.PtrCheck(cme); err != nil && errors.Is(err, syscall.ESRCH) {
@@ -1490,6 +1488,8 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	}
 	// Ruby doesn't provide the information about the function offset for the
 	// particular line. So we report 0 for this to our backend.
+
+	log.Debugf("cache: %t, flags (%s) (method: %s, label: %s, base: %s), (%d) %04x ", cmeHit, fullLabel.String(), methodName.String(), label.String(), baseLabel.String(), frameAddrType, frameFlags)
 	frames.Append(&libpf.Frame{
 		Type:         libpf.RubyFrame,
 		FunctionName: fullLabel,
@@ -1526,7 +1526,7 @@ func profileFrameFullLabel(classPath, label, baseLabel, methodName libpf.String,
 	}
 
 	if qualified == libpf.NullString || qualified == baseLabel {
-		return baseLabel
+		return label
 	}
 
 	labelLength := len(label.String())
