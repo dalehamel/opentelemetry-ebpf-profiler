@@ -8,14 +8,15 @@ import (
 	"debug/elf"
 	"encoding/binary"
 	"fmt"
-	"os"
+	"io"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"unsafe"
 
-	"go.opentelemetry.io/ebpf-profiler/remotememory"
+	"github.com/spf13/afero"
 )
+
+var fs = afero.NewOsFs()
 
 // Runtime linker structures not available in standard packages
 type rDebug struct {
@@ -50,10 +51,10 @@ type libraryInfo struct {
 
 type processInspector struct {
 	pid int
-	rm  remotememory.RemoteMemory
+	rm  io.ReaderAt
 }
 
-func newProcessInspector(pid int, rm remotememory.RemoteMemory) (*processInspector, error) {
+func newProcessInspector(pid int, rm io.ReaderAt) (*processInspector, error) {
 	return &processInspector{
 		pid: pid,
 		rm:  rm,
@@ -105,7 +106,7 @@ func (pi *processInspector) readString(addr uint64) (string, error) {
 
 func (pi *processInspector) getAuxVector() (map[uint64]uint64, error) {
 	auxvPath := fmt.Sprintf("/proc/%d/auxv", pi.pid)
-	data, err := os.ReadFile(auxvPath)
+	data, err := afero.ReadFile(fs, auxvPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read auxv: %v", err)
 	}
@@ -208,29 +209,6 @@ func (pi *processInspector) getMainExecutableBase(auxv map[uint64]uint64) (uint6
 			return base, nil
 		}
 	}
-
-	// Fallback: try to parse /proc/pid/maps
-	mapsPath := fmt.Sprintf("/proc/%d/maps", pi.pid)
-	data, err := os.ReadFile(mapsPath)
-	if err != nil {
-		return 0, fmt.Errorf("failed to read maps: %v", err)
-	}
-
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.Contains(line, "r-xp") && (strings.Contains(line, "/ruby") || strings.Contains(line, "/bin/")) {
-			fields := strings.Fields(line)
-			if len(fields) >= 1 {
-				addrRange := strings.Split(fields[0], "-")
-				if len(addrRange) > 0 {
-					base, err := strconv.ParseUint(addrRange[0], 16, 64)
-					if err == nil {
-						return base, nil
-					}
-				}
-			}
-		}
-	}
-
 	return 0, fmt.Errorf("could not determine main executable base address")
 }
 
