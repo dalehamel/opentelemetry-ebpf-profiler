@@ -1,6 +1,30 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+/*
+This test suite provides fixture-based tests which can be run with the
+environment variable RECORD_PID=$(pidof ruby). In which case, no assertions
+are run and a new test fixture is generated.
+
+It will record all of the memory accessed as well as the contents of auxv,
+and store it in a JSON file. When the tests are run, the memory reads are
+provided back these same values for the queried memory addresses.
+
+It is conceptually similar to a coredump test, but only the memory that is
+actually accessed is saved and provided back in the test stub.
+
+If the memory access pattern or schema of the recording changes, the fixtures
+are likely all invalidated and must be re-recorded.
+
+However, if the code changes, the fixtures should ensure that it continues to
+work in cases it previously worked in, and provides a spec for what IS supported
+and verified against at least.
+
+To record fixtures:
+
+RECORD_PID=$(pidof ruby) go test -race -count=1 -v ./interpreter/ruby
+*/
+
 package ruby
 
 import (
@@ -13,6 +37,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/spf13/afero"
@@ -22,6 +47,8 @@ import (
 	"go.opentelemetry.io/ebpf-profiler/libpf"
 	"go.opentelemetry.io/ebpf-profiler/remotememory"
 )
+
+const FIXTURE_FILE_FORMAT_STRING = "testdata/memory_recording_%d.json.gz"
 
 // MemoryRecorder wraps a RemoteMemory and records all reads
 type MemoryRecorder struct {
@@ -41,8 +68,8 @@ type RecordedRead struct {
 type RecordingData struct {
 	Reads []RecordedRead `json:"reads"`
 	// Metadata about the process
-	PID  int             `json:"pid"`
-	Auxv []byte          `json:"auxv"`
+	PID  int    `json:"pid"`
+	Auxv []byte `json:"auxv"`
 }
 
 func NewMemoryRecorder(rm io.ReaderAt, pid int, logReads bool) (*MemoryRecorder, error) {
@@ -101,13 +128,20 @@ func (mr *MemoryRecorder) GetRecording() RecordingData {
 func (mr *MemoryRecorder) SaveToFile() error {
 	data := mr.GetRecording()
 
-	jsonData, err := json.MarshalIndent(data, "", "  ")
+	file, err := os.Create(fmt.Sprintf(FIXTURE_FILE_FORMAT_STRING, mr.pid))
 	if err != nil {
 		return err
 	}
+	defer file.Close()
 
-	// TODO gzip encode
-	return os.WriteFile(fmt.Sprintf("testdata/memory_recording_%d.json", mr.pid), jsonData, 0644)
+	gz, err := gzip.NewWriterLevel(file, gzip.BestCompression)
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+
+	encoder := json.NewEncoder(gz)
+	return encoder.Encode(data)
 }
 
 // ReplayMemory implements RemoteMemory using recorded data
@@ -258,6 +292,14 @@ func ProcessInspectorTest(t *testing.T) {
 		expectedLibc   libcType
 	}{
 		{
+			desc:           "it works with a plain ruby invocation",
+			file:           "testdata/memory_recording_1835475.json.gz",
+			expectedModule: 1,
+			expectedLibs:   []libraryInfo{libraryInfo{name: "", path: "", baseAddress: 0xb127b97a0000, isVirtual: false, loadOrder: 0, hasTLS: false}, libraryInfo{name: "linux-vdso.so.1", path: "linux-vdso.so.1", baseAddress: 0xf76fcece2000, isVirtual: true, loadOrder: 1, hasTLS: false}, libraryInfo{name: "libruby.so.3.4", path: "/home/dalehamel.linux/.rubies/ruby-3.4.5/lib/libruby.so.3.4", baseAddress: 0xf76fce600000, isVirtual: false, loadOrder: 2, hasTLS: true}, libraryInfo{name: "libz.so.1", path: "/lib/aarch64-linux-gnu/libz.so.1", baseAddress: 0xf76fce5c0000, isVirtual: false, loadOrder: 3, hasTLS: false}, libraryInfo{name: "libcrypt.so.1", path: "/lib/aarch64-linux-gnu/libcrypt.so.1", baseAddress: 0xf76fce570000, isVirtual: false, loadOrder: 4, hasTLS: false}, libraryInfo{name: "libm.so.6", path: "/lib/aarch64-linux-gnu/libm.so.6", baseAddress: 0xf76fce4c0000, isVirtual: false, loadOrder: 5, hasTLS: false}, libraryInfo{name: "libc.so.6", path: "/lib/aarch64-linux-gnu/libc.so.6", baseAddress: 0xf76fce300000, isVirtual: false, loadOrder: 6, hasTLS: true}, libraryInfo{name: "ld-linux-aarch64.so.1", path: "/lib/ld-linux-aarch64.so.1", baseAddress: 0xf76fceca5000, isVirtual: false, loadOrder: 7, hasTLS: false}, libraryInfo{name: "libgcc_s.so.1", path: "/lib/aarch64-linux-gnu/libgcc_s.so.1", baseAddress: 0xf76fce2c0000, isVirtual: false, loadOrder: 8, hasTLS: true}, libraryInfo{name: "encdb.so", path: "/home/dalehamel.linux/.rubies/ruby-3.4.5/lib/ruby/3.4.0/aarch64-linux/enc/encdb.so", baseAddress: 0xf76fce060000, isVirtual: false, loadOrder: 9, hasTLS: false}, libraryInfo{name: "transdb.so", path: "/home/dalehamel.linux/.rubies/ruby-3.4.5/lib/ruby/3.4.0/aarch64-linux/enc/trans/transdb.so", baseAddress: 0xf76fce020000, isVirtual: false, loadOrder: 10, hasTLS: false}, libraryInfo{name: "monitor.so", path: "/home/dalehamel.linux/.rubies/ruby-3.4.5/lib/ruby/3.4.0/aarch64-linux/monitor.so", baseAddress: 0xf76fb4a80000, isVirtual: false, loadOrder: 11, hasTLS: false}},
+			expectedLibc:   libcGlibc,
+		},
+
+		{
 			desc:           "it works with jemalloc",
 			file:           "testdata/memory_recording_1735824.json.gz",
 			expectedModule: 2,
@@ -304,10 +346,12 @@ func recordProcess(t *testing.T, pid int) {
 	id, err := inspector.findTLSModuleID("libruby.so")
 	require.NoError(t, err)
 
+	fmt.Printf("Recorded fixture for pid: %d\n", pid)
+	fmt.Printf("Fixture file: %s\n", fmt.Sprintf(FIXTURE_FILE_FORMAT_STRING, pid))
 	fmt.Printf("TLS module ID %d\n", id)
 	libs, err := inspector.getLoadedLibraries()
 	require.NoError(t, err)
-	fmt.Printf("libraryInfo: %+v\n", libs)
+	fmt.Printf("libraryInfo:\n%s\n", strings.ReplaceAll(fmt.Sprintf("%#v", libs), "ruby.libraryInfo", "libraryInfo"))
 	libc := detectLibc(libs)
 	fmt.Printf("libc: %+v\n", libc)
 
@@ -322,6 +366,7 @@ func TestProcessVirtualMemory(t *testing.T) {
 		pid, err := strconv.Atoi(pidStr)
 		require.NoError(t, err)
 		recordProcess(t, pid)
+	} else {
+		ProcessInspectorTest(t)
 	}
-	ProcessInspectorTest(t)
 }

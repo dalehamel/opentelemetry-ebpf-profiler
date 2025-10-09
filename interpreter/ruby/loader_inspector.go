@@ -1,6 +1,58 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+/*
+Why do we need a loader inspecter?
+
+Ruby stores its current, running execution context in thread local storage (TLS)
+In order to reliably access this, we need:
+
+- The $fs_base location, where TLS variables are stored
+  - We can get this from ptrace in userspace, or the kernel task struct in BPF
+- The index within the DTV, which is dependant on the *load* order of the library
+  - The code here provides this, basically by acting like 'ldd'
+- The width of the DTV entries (eg, 2 byte with glibc, 1 byte with musl)
+  - The code here provides this by checking the library list and pattern matching
+- The TLS symbol index within the module-indexed DTV
+  - This is easy, it is in the ELF symbol table
+
+In memory:
+--$fs_base--
+DTV layout is the same across architectures:
+DTV[0] = generation counter
+DTV[1] = module 1's TLS block
+DTV[2] = module 2's TLS block
+etc.
+
+DTV layout is like:
+DTV[1]: map[usize]usize
+
+Where lookup would be like:
+tls_var_value = DTV[MODULE_INDEX][ELF_TLS_SYMBOL]
+
+Very importantly, the module index is determined by the order that it is
+**loaded into memory**, not its **position in the memory map**.
+
+So this tool aims to mimic what ldd does, determining all of the linked libraries.
+We cannot just use the ELF file for this, we need to look at a running process.
+Factors like LD_LIBRARY_PATH and LD_PRELOAD make this difficult to compute, so
+the most reliable way to get this load order is from the running process itself,
+as the linker has already computed all of this, and written this information to
+is to parse /proc/PID/auxv, and locate the link map and parse this out of memory.
+
+Once we have the link map, we check the ELF files for TLS sections, and assign
+them a module ID based on the order we found them in.
+
+Since this also gives us a list of all linked libraries, we can use this to
+pretty reliably determine which libc was being used. We need this to know the
+width of DTV entries when reading them.
+
+Ruby frequently has libruby.so at module index 1, but it also frequently uses
+LD_PRELOAD in particular for loading jemalloc. It may also LD_PRELOAD other
+libraries, so we can't just rely on convention - the safest thing to do is to
+look it up to ensure the profiler will get a valid TLS.
+*/
+
 package ruby
 
 import (
