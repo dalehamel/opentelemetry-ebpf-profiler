@@ -256,6 +256,18 @@ enum {
   // number of failures to read the instruction sequence size
   metricID_UnwindRubyErrReadIseqSize,
 
+  // number of failures to read callable method entry flags
+  metricID_UnwindRubyErrReadCMEFlags,
+
+  // number of failures to read the method entry from an SVAR imemo
+  metricID_UnwindRubyErrReadMethodEntryFromSvar,
+
+  // number of failures to read the env_specval
+  metricID_UnwindRubyErrReadEnvSpecval,
+
+  // number of failures to read the env_me_cref
+  metricID_UnwindRubyErrReadEnvMeCref,
+
   // number of times the unwind instructions requested LR unwinding mid-trace
   metricID_UnwindNativeErrLrUnwindingMidTrace,
 
