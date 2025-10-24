@@ -14,11 +14,11 @@ import (
 #include "./ebpf/frametypes.h"
 #include "./ebpf/stackdeltatypes.h"
 #include "./ebpf/v8_tracer.h"
+#include "./ebpf/ruby_tracer.h"
 */
 import "C"
 
 const (
-<<<<<<< HEAD
 	FrameMarkerUnknown  = C.FRAME_MARKER_UNKNOWN
 	FrameMarkerErrorBit = C.FRAME_MARKER_ERROR_BIT
 	FrameMarkerPython   = C.FRAME_MARKER_PYTHON
@@ -196,6 +196,14 @@ const (
 	V8LineCookieShift = C.V8_LINE_COOKIE_SHIFT
 	V8LineCookieMask  = C.V8_LINE_COOKIE_MASK
 	V8LineDeltaMask   = C.V8_LINE_DELTA_MASK
+
+	RubyAddrMask48Bit     = C.ADDR_MASK_48_BIT
+	RubyExtraAddrTypeMask = C.EXTRA_TYPE_MASK
+
+	RubyFrameTypeNone     = C.FRAME_TYPE_NONE
+	RubyFrameTypeCmeIseq  = C.FRAME_TYPE_CME_ISEQ
+	RubyFrameTypeCmeCfunc = C.FRAME_TYPE_CME_CFUNC
+	RubyFrameTypeIseq     = C.FRAME_TYPE_ISEQ
 )
 
 var MetricsTranslation = []metrics.MetricID{
@@ -289,4 +297,10 @@ var MetricsTranslation = []metrics.MetricID{
 	C.metricID_UnwindDotnetErrBadFP:                       metrics.IDUnwindDotnetErrBadFP,
 	C.metricID_UnwindDotnetErrCodeHeader:                  metrics.IDUnwindDotnetErrCodeHeader,
 	C.metricID_UnwindDotnetErrCodeTooLarge:                metrics.IDUnwindDotnetErrCodeTooLarge,
+	C.metricID_UnwindRubyErrInvalidIseq:                   metrics.IDUnwindRubyErrInvalidIseq,
+	C.metricID_UnwindRubyErrReadMethodDef:                 metrics.IDUnwindRubyErrReadMethodDef,
+	C.metricID_UnwindRubyErrReadMethodType:                metrics.IDUnwindRubyErrReadMethodType,
+	C.metricID_UnwindRubyErrReadSvar:                      metrics.IDUnwindRubyErrReadSvar,
+	C.metricID_UnwindRubyErrReadRbasicFlags:               metrics.IDUnwindRubyErrReadRbasicFlags,
+	C.metricID_UnwindRubyErrCmeMaxEp:                      metrics.IDUnwindRubyErrCmeMaxEp,
 }
