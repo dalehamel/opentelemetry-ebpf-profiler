@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"math/bits"
-	//"os"
+	"os"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -31,9 +31,10 @@ import (
 	"go.opentelemetry.io/ebpf-profiler/libpf/pfunsafe"
 	"go.opentelemetry.io/ebpf-profiler/lpm"
 	"go.opentelemetry.io/ebpf-profiler/metrics"
+	npsr "go.opentelemetry.io/ebpf-profiler/nopanicslicereader"
 	"go.opentelemetry.io/ebpf-profiler/process"
 	"go.opentelemetry.io/ebpf-profiler/remotememory"
-	//"go.opentelemetry.io/ebpf-profiler/reporter"
+	"go.opentelemetry.io/ebpf-profiler/reporter"
 	"go.opentelemetry.io/ebpf-profiler/successfailurecounter"
 	"go.opentelemetry.io/ebpf-profiler/support"
 	"go.opentelemetry.io/ebpf-profiler/util"
@@ -94,6 +95,8 @@ const (
 	// ISEQ_TYPE_METHOD
 	// https://github.com/ruby/ruby/blob/v3_4_5/vm_core.h#L380
 	iseqTypeMethod = 1
+
+	rubyCurrentEcTlsSymbol = "ruby_current_ec"
 )
 
 const (
@@ -161,7 +164,7 @@ type rubyData struct {
 	// eBPF program to build ruby backtraces.
 	currentCtxPtr libpf.Address
 
-	currentEcTlsOffset uint64
+	currentEcTpBaseTlsOffset libpf.Address
 
 	// Address to global symbols, for id to string mappings
 	globalSymbolsAddr libpf.Address
@@ -292,11 +295,14 @@ func rubyVersion(major, minor, release uint32) uint32 {
 func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libpf.Address,
 	rm remotememory.RemoteMemory) (interpreter.Instance, error) {
 
+	// Read TLS offset from the TLS descriptor.
+	tlsOffset := rm.Uint64(bias + r.currentEcTpBaseTlsOffset + 8)
+
 	cdata := support.RubyProcInfo{
 		Version: r.version,
 
-		Current_ctx_ptr:       uint64(r.currentCtxPtr + bias),
-		Current_ec_tls_offset: r.currentEcTlsOffset,
+		Current_ctx_ptr:              uint64(r.currentCtxPtr + bias),
+		Current_ec_tpbase_tls_offset: tlsOffset,
 
 		Vm_stack:      r.vmStructs.execution_context_struct.vm_stack,
 		Vm_stack_size: r.vmStructs.execution_context_struct.vm_stack_size,
@@ -326,12 +332,7 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 		return nil, err
 	}
 
-	iseqBodyPCToFunction, err := freelru.New[rubyIseqBodyPC, *rubyIseq](iseqCacheSize,
-		hashRubyIseqBodyPC)
-	if err != nil {
-		return nil, err
-	}
-
+	// TODO delete me
 	cmeCache, err := freelru.New[libpf.Address, *rubyCme](cmeCacheSize,
 		hashCme)
 	if err != nil {
@@ -354,7 +355,6 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 		// TODO - we can probably just rely on the frame cache added in
 		// https://github.com/open-telemetry/opentelemetry-ebpf-profiler/commit/97be3669b0f0d66f52ff9d6d33cd482f4eddb6d6
 		cmeCache:             cmeCache,
-		iseqBodyPCToFunction: iseqBodyPCToFunction,
 		addrToString:         addrToString,
 		mappings:             make(map[process.Mapping]*uint32),
 		prefixes:             make(map[lpm.Prefix]*uint32),
@@ -444,7 +444,7 @@ type rubyInstance struct {
 	cmeCache *freelru.LRU[libpf.Address, *rubyCme]
 
 	//// Ruby JIT mappings
-	//jitMap *PerfMap
+	jitMap *PerfMap
 	// addrToString maps an address to an extracted Ruby String from this address.
 	addrToString *freelru.LRU[libpf.Address, libpf.String]
 
@@ -1064,105 +1064,105 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, cmeFrameType uint8
 	return classPath, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, nil
 }
 
-//func (r *rubyInstance) SynchronizeMappings(ebpf interpreter.EbpfHandler,
-//	_ reporter.SymbolReporter, pr process.Process, mappings []process.Mapping) error {
-//	log.Debugf("Synchronizing ruby mappings")
-//	pid := pr.PID()
-//	r.mappingGeneration++
-//	var jitMapping *process.Mapping
-//	jitFound := false
-//	for idx := range mappings {
-//		m := &mappings[idx]
-//		if !m.IsExecutable() || !m.IsAnonymous() {
-//			continue
-//		}
-//		// If prctl is allowed, ruby should label the memory region
-//		// always prefer that
-//		if strings.Contains(m.Path.String(), "jit_reserve_addr_space") {
-//			jitMapping = m
-//			jitFound = true
-//		}
-//		// Use the first executable anon region we find if it isn't labeled
-//		// If we find more, prefer ones earlier in memory or larger in size
-//		if !jitFound && (jitMapping == nil || m.Vaddr < jitMapping.Vaddr || m.Length > jitMapping.Length) {
-//			// Don't set jitFound here as it is a heuristic, we aren't sure
-//			// could be on a system without linux config flag to allow prctl to label memoy
-//			jitMapping = m
-//		}
-//
-//		if _, exists := r.mappings[*m]; exists {
-//			*r.mappings[*m] = r.mappingGeneration
-//			continue
-//		}
-//
-//		// Generate a new uint32 pointer which is shared for mapping and the prefixes it owns
-//		// so updating the mapping above will reflect to prefixes also.
-//		mappingGeneration := r.mappingGeneration
-//		r.mappings[*m] = &mappingGeneration
-//
-//		// Just assume all anonymous and executable mappings are Ruby for now
-//		log.Debugf("Enabling Ruby interpreter for %#x/%#x", m.Vaddr, m.Length)
-//
-//		prefixes, err := lpm.CalculatePrefixList(m.Vaddr, m.Vaddr+m.Length)
-//		if err != nil {
-//			return fmt.Errorf("new anonymous mapping lpm failure %#x/%#x", m.Vaddr, m.Length)
-//		}
-//
-//		for _, prefix := range prefixes {
-//			_, exists := r.prefixes[prefix]
-//			if !exists {
-//				err := ebpf.UpdatePidInterpreterMapping(pid, prefix, support.ProgUnwindRuby, 0, 0)
-//				if err != nil {
-//					return err
-//				}
-//			}
-//			r.prefixes[prefix] = &mappingGeneration
-//		}
-//	}
-//	if jitMapping != nil && (r.procInfo.Jit_start != jitMapping.Vaddr || r.procInfo.Jit_end != jitMapping.Vaddr+jitMapping.Length) {
-//		r.procInfo.Jit_start = jitMapping.Vaddr
-//		r.procInfo.Jit_end = jitMapping.Vaddr + jitMapping.Length
-//		if err := ebpf.UpdateProcData(libpf.Ruby, pr.PID(), unsafe.Pointer(&r.procInfo)); err != nil {
-//			return err
-//		}
-//		log.Debugf("Added jit mapping %08x ruby proc info, %08x", r.procInfo.Jit_start, r.procInfo.Jit_end)
-//
-//		if r.jitMap == nil {
-//			// Check for jit interface here, store the path to the file so we can
-//			// lookup the jit PCs rather than push a dummy frame
-//			jitFile := fmt.Sprintf("/tmp/perf-%d.map", pr.PID())
-//			if _, err := os.Stat(jitFile); err != nil {
-//				log.Warnf("Jit mapping not found for ruby process at %s", jitFile)
-//			} else {
-//				perfMap := NewPerfMap()
-//				if err := perfMap.ParseFile(jitFile); err != nil {
-//					log.Errorf("Unable to parse perf map at %s, %v", jitFile, err)
-//				} else {
-//					log.Debugf("Loaded perf map from %s, stats: %s", jitFile, perfMap.Stats())
-//					r.jitMap = perfMap
-//				}
-//			}
-//		}
-//	}
-//	// Remove prefixes not seen
-//	for prefix, generationPtr := range r.prefixes {
-//		if *generationPtr == r.mappingGeneration {
-//			continue
-//		}
-//		log.Debugf("Delete Ruby prefix %#v", prefix)
-//		_ = ebpf.DeletePidInterpreterMapping(pid, prefix)
-//		delete(r.prefixes, prefix)
-//	}
-//	for m, generationPtr := range r.mappings {
-//		if *generationPtr == r.mappingGeneration {
-//			continue
-//		}
-//		log.Debugf("Disabling Ruby for %#x/%#x", m.Vaddr, m.Length)
-//		delete(r.mappings, m)
-//	}
-//
-//	return nil
-//}
+func (r *rubyInstance) SynchronizeMappings(ebpf interpreter.EbpfHandler,
+	_ reporter.ExecutableReporter, pr process.Process, mappings []process.Mapping) error {
+	log.Debugf("Synchronizing ruby mappings")
+	pid := pr.PID()
+	r.mappingGeneration++
+	var jitMapping *process.Mapping
+	jitFound := false
+	for idx := range mappings {
+		m := &mappings[idx]
+		if !m.IsExecutable() || !m.IsAnonymous() {
+			continue
+		}
+		// If prctl is allowed, ruby should label the memory region
+		// always prefer that
+		if strings.Contains(m.Path.String(), "jit_reserve_addr_space") {
+			jitMapping = m
+			jitFound = true
+		}
+		// Use the first executable anon region we find if it isn't labeled
+		// If we find more, prefer ones earlier in memory or larger in size
+		if !jitFound && (jitMapping == nil || m.Vaddr < jitMapping.Vaddr || m.Length > jitMapping.Length) {
+			// Don't set jitFound here as it is a heuristic, we aren't sure
+			// could be on a system without linux config flag to allow prctl to label memoy
+			jitMapping = m
+		}
+
+		if _, exists := r.mappings[*m]; exists {
+			*r.mappings[*m] = r.mappingGeneration
+			continue
+		}
+
+		// Generate a new uint32 pointer which is shared for mapping and the prefixes it owns
+		// so updating the mapping above will reflect to prefixes also.
+		mappingGeneration := r.mappingGeneration
+		r.mappings[*m] = &mappingGeneration
+
+		// Just assume all anonymous and executable mappings are Ruby for now
+		log.Debugf("Enabling Ruby interpreter for %#x/%#x", m.Vaddr, m.Length)
+
+		prefixes, err := lpm.CalculatePrefixList(m.Vaddr, m.Vaddr+m.Length)
+		if err != nil {
+			return fmt.Errorf("new anonymous mapping lpm failure %#x/%#x", m.Vaddr, m.Length)
+		}
+
+		for _, prefix := range prefixes {
+			_, exists := r.prefixes[prefix]
+			if !exists {
+				err := ebpf.UpdatePidInterpreterMapping(pid, prefix, support.ProgUnwindRuby, 0, 0)
+				if err != nil {
+					return err
+				}
+			}
+			r.prefixes[prefix] = &mappingGeneration
+		}
+	}
+	if jitMapping != nil && (r.procInfo.Jit_start != jitMapping.Vaddr || r.procInfo.Jit_end != jitMapping.Vaddr+jitMapping.Length) {
+		r.procInfo.Jit_start = jitMapping.Vaddr
+		r.procInfo.Jit_end = jitMapping.Vaddr + jitMapping.Length
+		if err := ebpf.UpdateProcData(libpf.Ruby, pr.PID(), unsafe.Pointer(&r.procInfo)); err != nil {
+			return err
+		}
+		log.Debugf("Added jit mapping %08x ruby proc info, %08x", r.procInfo.Jit_start, r.procInfo.Jit_end)
+
+		if r.jitMap == nil {
+			// Check for jit interface here, store the path to the file so we can
+			// lookup the jit PCs rather than push a dummy frame
+			jitFile := fmt.Sprintf("/tmp/perf-%d.map", pr.PID())
+			if _, err := os.Stat(jitFile); err != nil {
+				log.Warnf("Jit mapping not found for ruby process at %s", jitFile)
+			} else {
+				perfMap := NewPerfMap()
+				if err := perfMap.ParseFile(jitFile); err != nil {
+					log.Errorf("Unable to parse perf map at %s, %v", jitFile, err)
+				} else {
+					log.Debugf("Loaded perf map from %s, stats: %s", jitFile, perfMap.Stats())
+					r.jitMap = perfMap
+				}
+			}
+		}
+	}
+	// Remove prefixes not seen
+	for prefix, generationPtr := range r.prefixes {
+		if *generationPtr == r.mappingGeneration {
+			continue
+		}
+		log.Debugf("Delete Ruby prefix %#v", prefix)
+		_ = ebpf.DeletePidInterpreterMapping(pid, prefix)
+		delete(r.prefixes, prefix)
+	}
+	for m, generationPtr := range r.mappings {
+		if *generationPtr == r.mappingGeneration {
+			continue
+		}
+		log.Debugf("Disabling Ruby for %#x/%#x", m.Vaddr, m.Length)
+		delete(r.mappings, m)
+	}
+
+	return nil
+}
 
 func processDied(frames *libpf.Frames) {
 	frames.Append(&libpf.Frame{
@@ -1362,29 +1362,29 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 			SourceLine:   0,
 		})
 		return nil
-	//case support.RubyFrameTypeJit:
-	//	label := rubyJitDummyFrame
-	//	if r.jitMap != nil {
-	//		jitSymbol, ok, err := r.jitMap.LookupWithReload(uint64(frameAddr))
-	//		if err != nil {
-	//			log.Errorf("Error loading looking up jit symbol for PC %08X: %v", frameAddr, err)
-	//		}
-	//		if !ok {
-	//			log.Warnf("JIT: Unable to lookup PC %08x, map stats: %s", frameAddr, r.jitMap.Stats())
-	//		} else {
-	//			log.Debugf("Found JIT symbol %s for PC %08X", jitSymbol.Name, frameAddr)
-	//			label = libpf.Intern(jitSymbol.Name)
-	//		}
-	//	} else {
-	//		log.Warnf("JIT: unable to symbolize, no jit mapping loaded")
-	//	}
-	//	frames.Append(&libpf.Frame{
-	//		Type:         libpf.RubyFrame,
-	//		FunctionName: label,
-	//		SourceFile:   rubyJitDummyFile,
-	//		SourceLine:   0,
-	//	})
-	//	return nil
+	case support.RubyFrameTypeJit:
+		label := rubyJitDummyFrame
+		if r.jitMap != nil {
+			jitSymbol, ok, err := r.jitMap.LookupWithReload(uint64(frameAddr))
+			if err != nil {
+				log.Errorf("Error loading looking up jit symbol for PC %08X: %v", frameAddr, err)
+			}
+			if !ok {
+				log.Warnf("JIT: Unable to lookup PC %08x, map stats: %s", frameAddr, r.jitMap.Stats())
+			} else {
+				log.Debugf("Found JIT symbol %s for PC %08X", jitSymbol.Name, frameAddr)
+				label = libpf.Intern(jitSymbol.Name)
+			}
+		} else {
+			log.Warnf("JIT: unable to symbolize, no jit mapping loaded")
+		}
+		frames.Append(&libpf.Frame{
+			Type:         libpf.RubyFrame,
+			FunctionName: label,
+			SourceFile:   rubyJitDummyFile,
+			SourceLine:   0,
+		})
+		return nil
 	default:
 		err = fmt.Errorf("Unable to get CME or ISEQ from frame address")
 	}
@@ -1624,14 +1624,13 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 		currentCtxSymbol = "ruby_current_execution_context_ptr"
 	}
 
-	var currentEcTlsOffset libpf.SymbolValue
+	var currentEcTpBaseTlsOffset libpf.Address
 	var interpRanges []util.Range
 
 	globalSymbolsName := libpf.SymbolName("ruby_global_symbols")
 	if version < rubyVersion(2, 7, 0) {
 		globalSymbolsName = libpf.SymbolName("global_symbols")
 	}
-	// TODO look it up 
 
 	// rb_vm_exec is used to execute the Ruby frames in the Ruby VM and is called within
 	// ruby_run_node  which is the main executor function since Ruby v1.9.0
@@ -1662,6 +1661,11 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 		log.Debugf("Direct lookup of %v failed: %v, will try fallback", interpSymbolName, err)
 	}
 
+	globalSymbolsAddr, err := ef.LookupSymbolAddress(globalSymbolsName)
+	if err != nil {
+		log.Debugf("Direct lookup of %v failed: %v, will try fallback", globalSymbolsName, err)
+	}
+
 	if err = ef.VisitSymbols(func(s libpf.Symbol) bool {
 		if s.Name == currentEcSymbolName {
 			currentEcSymbolAddress = s.Address
@@ -1669,13 +1673,16 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 		if s.Name == currentCtxSymbol {
 			currentCtxPtr = s.Address
 		}
+		if s.Name == globalSymbolsName {
+			globalSymbolsAddr = s.Address
+		}
 		if len(interpRanges) == 0 && s.Name == interpSymbolName {
 			interpRanges = []util.Range{{
 				Start: uint64(s.Address),
 				End:   uint64(s.Address) + s.Size,
 			}}
 		}
-		if len(interpRanges) > 0 && currentEcSymbolAddress != 0 && currentCtxPtr != 0 {
+		if len(interpRanges) > 0 && currentEcSymbolAddress != 0 && currentCtxPtr != 0 && globalSymbolsAddr != libpf.SymbolValueInvalid {
 			return false
 		}
 		return true
@@ -1704,6 +1711,7 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 		version:            version,
 		currentEcTpBaseTlsOffset:     libpf.Address(currentEcTpBaseTlsOffset),
 		currentCtxPtr:      libpf.Address(currentCtxPtr),
+		globalSymbolsAddr:  libpf.Address(globalSymbolsAddr),
 	}
 
 	vms := &rid.vmStructs
