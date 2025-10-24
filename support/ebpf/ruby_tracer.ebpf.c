@@ -589,8 +589,13 @@ static EBPF_INLINE int unwind_ruby(struct pt_regs *ctx)
   }
 
   error = walk_ruby_stack(record, rubyinfo, current_ctx_addr, &unwinder);
-
 exit:
+
+  // FIXME - we should only return positive, properly named errors
+  // This is a hack to just not set -1 as the error code, which underflows
+  if (error < 0 || error == 4294967295) {
+    error = ERR_RUBY_READ_STACK_PTR;
+  }
   record->state.unwind_error = error;
   tail_call(ctx, unwinder);
   return -1;
