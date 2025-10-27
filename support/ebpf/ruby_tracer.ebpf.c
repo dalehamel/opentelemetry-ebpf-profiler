@@ -39,8 +39,7 @@ struct ruby_procs_t {
 #define VM_FRAME_MAGIC_CFUNC 0x55550001
 
 // Record a Ruby cfp frame
-static EBPF_INLINE ErrorCode
-push_ruby(Trace *trace, u16 flags, u8 frame_type, u64 file, u64 line)
+static EBPF_INLINE ErrorCode push_ruby(Trace *trace, u16 flags, u8 frame_type, u64 file, u64 line)
 {
   if (frame_type != FRAME_TYPE_NONE) {
     // Ensure address is actually no more than 48-bits
@@ -87,115 +86,10 @@ typedef struct vm_env_struct {
   const void *flags;
 } vm_env_t;
 
-// walk_ruby_stack processes a Ruby VM stack, extracts information from the individual frames and
-// pushes this information to user space for symbolization of these frames.
-//
-// Ruby unwinder workflow:
-// From the current execution context struct [0] we can get pointers to the current Ruby VM stack
-// as well as to the current call frame pointer (cfp).
-// On the Ruby VM stack we have for each cfp one struct [1]. These cfp structs then point to
-// instruction sequence (iseq) structs [2] that store the information about file and function name
-// that we forward to user space for the symbolization process of the frame, or they may
-// point to a callable method entry (cme) [3]. In the Ruby's own backtrace functions, they
-// may store either of these [4]. In the case of a cme, since ruby 3.3.0 [5] class names
-// have been stored as an easily accessible struct member on the classext, accessible
-// through the cme. We will check the frame for IMEMO_MENT to see if it is a cme frame,
-// and if so we will try to get the classname. The iseq body is accessible through
-// additional indirection of the cme, so we can still get the file and function names
-// through the existing method.
-//
-// If the frame is a cme, we will push it with a separate frame type to userspace
-// so that the Symbolizer will know what type of pointer we have given it, and
-// can search the struct at the right offsets for the classpath and iseq body.
-//
-// If the frame is the iseq type, the original logic of just extracting the function
-// and file names and line numbers is executed.
-//
-// [0] rb_execution_context_struct
-// https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L843
-//
-// [1] rb_control_frame_struct
-// https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L760
-//
-// [3] rb_callable_method_entry_struct
-// https://github.com/ruby/ruby/blob/fd59ac6410d0cc93a8baaa42df77491abdb2e9b6/method.h#L63-L69
-//
-// [4] thread_profile_frames frame storage of cme or iseq
-// https://github.com/ruby/ruby/blob/fd59ac6410d0cc93a8baaa42df77491abdb2e9b6/vm_backtrace.c#L1754-L1761
-//
-// [5] classpath stored as struct member instead of ivar
-// https://github.com/ruby/ruby/commit/abff5f62037284024aaf469fc46a6e8de98fa1e3
-
-static EBPF_INLINE ErrorCode walk_ruby_stack(
-  PerCPURecord *record,
-  const RubyProcInfo *rubyinfo,
-  const void *current_ctx_addr,
-  int *next_unwinder)
+static EBPF_INLINE ErrorCode read_ruby_frame(
+  PerCPURecord *record, const RubyProcInfo *rubyinfo, void *stack_ptr, int *next_unwinder)
 {
-  if (!current_ctx_addr) {
-    *next_unwinder = get_next_unwinder_after_interpreter();
-    return ERR_OK;
-  }
-
-  Trace *trace   = &record->trace;
-  *next_unwinder = PROG_UNWIND_STOP;
-
-  // stack_ptr points to the frame of the Ruby VM call stack that will be unwound next
-  void *stack_ptr        = record->rubyUnwindState.stack_ptr;
-  // last_stack_frame points to the last frame on the Ruby VM stack we want to process
-  void *last_stack_frame = record->rubyUnwindState.last_stack_frame;
-
-  if (!stack_ptr || !last_stack_frame) {
-    // stack_ptr_current points to the current frame in the Ruby VM call stack
-    void *stack_ptr_current;
-    // stack_size does not reflect the number of frames on the Ruby VM stack
-    // but contains the current stack size in words.
-    // stack_size = size in word (size in bytes / sizeof(VALUE))
-    // https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L846
-    size_t stack_size;
-
-    if (bpf_probe_read_user(
-          &stack_ptr_current,
-          sizeof(stack_ptr_current),
-          (void *)(current_ctx_addr + rubyinfo->vm_stack))) {
-      DEBUG_PRINT("ruby: failed to read current stack pointer");
-      increment_metric(metricID_UnwindRubyErrReadStackPtr);
-      return ERR_RUBY_READ_STACK_PTR;
-    }
-
-    if (bpf_probe_read_user(
-          &stack_size, sizeof(stack_size), (void *)(current_ctx_addr + rubyinfo->vm_stack_size))) {
-      DEBUG_PRINT("ruby: failed to get stack size");
-      increment_metric(metricID_UnwindRubyErrReadStackSize);
-      return ERR_RUBY_READ_STACK_SIZE;
-    }
-
-    // Calculate the base of the stack so we can calculate the number of frames from it.
-    // Ruby places two dummy frames on the Ruby VM stack in which we are not interested.
-    // https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_backtrace.c#L477-L485
-    last_stack_frame = stack_ptr_current + (rubyinfo->size_of_value * stack_size) -
-                       (2 * rubyinfo->size_of_control_frame_struct);
-
-    if (bpf_probe_read_user(
-          &stack_ptr, sizeof(stack_ptr), (void *)(current_ctx_addr + rubyinfo->cfp))) {
-      DEBUG_PRINT("ruby: failed to get cfp");
-      increment_metric(metricID_UnwindRubyErrReadCfp);
-      return ERR_RUBY_READ_CFP;
-    }
-  }
-
-  // If we entered native unwinding because we saw a cfunc frame, lets push that
-  // frame now so it can take "ownership" of the native code that was unwound
-  if (record->rubyUnwindState.cfunc_saved_frame != 0) {
-    ErrorCode error = push_ruby(
-      trace, 0, FRAME_TYPE_CME_CFUNC, record->rubyUnwindState.cfunc_saved_frame, 0);
-    if (error) {
-      DEBUG_PRINT("ruby: failed to push cframe");
-      return error;
-    }
-    record->rubyUnwindState.cfunc_saved_frame = 0;
-  }
-
+  Trace *trace = &record->trace;
   // Type of frame we found and are pushing (encoded in upper bits of Frame
   u8 frame_type;
   // Actual frame address of the given type
@@ -212,7 +106,6 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
   bool cfunc       = false;
 
   u64 ep_check = 0;
-  u32 i        = 0;
 
   rb_control_frame_t control_frame;
   vm_env_t vm_env;
@@ -313,7 +206,7 @@ done_check:
     frame_addr = me_or_cref;
 
     if (cfunc) {
-      frame_type = FRAME_TYPE_CME_CFUNC;
+      frame_type                                = FRAME_TYPE_CME_CFUNC;
       // We save this cfp on in the "Record" entry, and when we start the unwinder
       // again we'll push it so that the order is correct and the cfunc "owns" any native code we
       // unwound rather than eliding it
@@ -323,7 +216,8 @@ done_check:
       stack_ptr += rubyinfo->size_of_control_frame_struct;
 
       *next_unwinder = PROG_UNWIND_NATIVE;
-      goto save_state;
+      // Return early as we don't want to push this frame until we return to ruby unwinder
+      return ERR_OK;
     } else {
       // Now we must further verify that it is ISEQ type, but do it out of the loop
       // https://github.com/ruby/ruby/blob/v3_4_5/vm_backtrace.c#L1736
@@ -379,18 +273,135 @@ done_check:
     return error;
   }
   increment_metric(metricID_UnwindRubyFrames);
-skip:
-  if (last_stack_frame <= stack_ptr) {
-    // We have processed all frames in the Ruby VM and can stop here.
-    *next_unwinder = PROG_UNWIND_NATIVE;
-    goto save_state;
+
+  return ERR_OK;
+}
+// walk_ruby_stack processes a Ruby VM stack, extracts information from the individual frames and
+// pushes this information to user space for symbolization of these frames.
+//
+// Ruby unwinder workflow:
+// From the current execution context struct [0] we can get pointers to the current Ruby VM stack
+// as well as to the current call frame pointer (cfp).
+// On the Ruby VM stack we have for each cfp one struct [1]. These cfp structs then point to
+// instruction sequence (iseq) structs [2] that store the information about file and function name
+// that we forward to user space for the symbolization process of the frame, or they may
+// point to a callable method entry (cme) [3]. In the Ruby's own backtrace functions, they
+// may store either of these [4]. In the case of a cme, since ruby 3.3.0 [5] class names
+// have been stored as an easily accessible struct member on the classext, accessible
+// through the cme. We will check the frame for IMEMO_MENT to see if it is a cme frame,
+// and if so we will try to get the classname. The iseq body is accessible through
+// additional indirection of the cme, so we can still get the file and function names
+// through the existing method.
+//
+// If the frame is a cme, we will push it with a separate frame type to userspace
+// so that the Symbolizer will know what type of pointer we have given it, and
+// can search the struct at the right offsets for the classpath and iseq body.
+//
+// If the frame is the iseq type, the original logic of just extracting the function
+// and file names and line numbers is executed.
+//
+// [0] rb_execution_context_struct
+// https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L843
+//
+// [1] rb_control_frame_struct
+// https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L760
+//
+// [3] rb_callable_method_entry_struct
+// https://github.com/ruby/ruby/blob/fd59ac6410d0cc93a8baaa42df77491abdb2e9b6/method.h#L63-L69
+//
+// [4] thread_profile_frames frame storage of cme or iseq
+// https://github.com/ruby/ruby/blob/fd59ac6410d0cc93a8baaa42df77491abdb2e9b6/vm_backtrace.c#L1754-L1761
+//
+// [5] classpath stored as struct member instead of ivar
+// https://github.com/ruby/ruby/commit/abff5f62037284024aaf469fc46a6e8de98fa1e3
+
+static EBPF_INLINE ErrorCode walk_ruby_stack(
+  PerCPURecord *record,
+  const RubyProcInfo *rubyinfo,
+  const void *current_ctx_addr,
+  int *next_unwinder)
+{
+  if (!current_ctx_addr) {
+    *next_unwinder = get_next_unwinder_after_interpreter();
+    return ERR_OK;
   }
+
+  Trace *trace   = &record->trace;
+  *next_unwinder = PROG_UNWIND_STOP;
+
+  // TODO unroll maybe instead
+  int i                  = 0;
+  // stack_ptr points to the frame of the Ruby VM call stack that will be unwound next
+  void *stack_ptr        = record->rubyUnwindState.stack_ptr;
+  // last_stack_frame points to the last frame on the Ruby VM stack we want to process
+  void *last_stack_frame = record->rubyUnwindState.last_stack_frame;
+
+  if (!stack_ptr || !last_stack_frame) {
+    // stack_ptr_current points to the current frame in the Ruby VM call stack
+    void *stack_ptr_current;
+    // stack_size does not reflect the number of frames on the Ruby VM stack
+    // but contains the current stack size in words.
+    // stack_size = size in word (size in bytes / sizeof(VALUE))
+    // https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L846
+    size_t stack_size;
+
+    if (bpf_probe_read_user(
+          &stack_ptr_current,
+          sizeof(stack_ptr_current),
+          (void *)(current_ctx_addr + rubyinfo->vm_stack))) {
+      DEBUG_PRINT("ruby: failed to read current stack pointer");
+      increment_metric(metricID_UnwindRubyErrReadStackPtr);
+      return ERR_RUBY_READ_STACK_PTR;
+    }
+
+    if (bpf_probe_read_user(
+          &stack_size, sizeof(stack_size), (void *)(current_ctx_addr + rubyinfo->vm_stack_size))) {
+      DEBUG_PRINT("ruby: failed to get stack size");
+      increment_metric(metricID_UnwindRubyErrReadStackSize);
+      return ERR_RUBY_READ_STACK_SIZE;
+    }
+
+    // Calculate the base of the stack so we can calculate the number of frames from it.
+    // Ruby places two dummy frames on the Ruby VM stack in which we are not interested.
+    // https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_backtrace.c#L477-L485
+    last_stack_frame = stack_ptr_current + (rubyinfo->size_of_value * stack_size) -
+                       (2 * rubyinfo->size_of_control_frame_struct);
+
+    if (bpf_probe_read_user(
+          &stack_ptr, sizeof(stack_ptr), (void *)(current_ctx_addr + rubyinfo->cfp))) {
+      DEBUG_PRINT("ruby: failed to get cfp");
+      increment_metric(metricID_UnwindRubyErrReadCfp);
+      return ERR_RUBY_READ_CFP;
+    }
+  }
+
+  // If we entered native unwinding because we saw a cfunc frame, lets push that
+  // frame now so it can take "ownership" of the native code that was unwound
+  if (record->rubyUnwindState.cfunc_saved_frame != 0) {
+    ErrorCode error =
+      push_ruby(trace, 0, FRAME_TYPE_CME_CFUNC, record->rubyUnwindState.cfunc_saved_frame, 0);
+    if (error) {
+      DEBUG_PRINT("ruby: failed to push cframe");
+      return error;
+    }
+    record->rubyUnwindState.cfunc_saved_frame = 0;
+  }
+
+  ErrorCode error;
+read_frame:
+  error = read_ruby_frame(record, rubyinfo, stack_ptr, next_unwinder);
+  if (error != ERR_OK)
+    return error;
+
+  if (last_stack_frame <= stack_ptr)
+    *next_unwinder = PROG_UNWIND_NATIVE;
+  if (*next_unwinder == PROG_UNWIND_NATIVE)
+    goto save_state;
   stack_ptr += rubyinfo->size_of_control_frame_struct;
 
-  // jumping read_cfp label implements a much cheaper loop than using UNROLL macro
   i += 1;
   if (i < FRAMES_PER_WALK_RUBY_STACK)
-    goto read_cfp;
+    goto read_frame;
 
   *next_unwinder = PROG_UNWIND_RUBY;
 
