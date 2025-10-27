@@ -265,18 +265,11 @@ type PyProcInfo struct {
 }
 type RubyProcInfo struct {
 	Version                      uint32
-	Current_ctx_ptr              uint64
 	Current_ec_tpbase_tls_offset uint64
-	Jit_start                    uint64
-	Jit_end                      uint64
+	Current_ctx_ptr              uint64
 	Vm_stack                     uint8
 	Vm_stack_size                uint8
 	Cfp                          uint8
-	Thread_ptr                   uint8
-	Thread_vm                    uint8
-	Vm_objspace                  uint16
-	Objspace_flags               uint8
-	Objspace_size_of_flags       uint8
 	Pc                           uint8
 	Iseq                         uint8
 	Ep                           uint8
@@ -317,7 +310,7 @@ const (
 	sizeof_ApmIntProcInfo = 0x8
 	sizeof_DotnetProcInfo = 0x4
 	sizeof_PHPProcInfo    = 0x18
-	sizeof_RubyProcInfo   = 0x40
+	sizeof_RubyProcInfo   = 0x28
 )
 
 const (
@@ -372,13 +365,6 @@ const (
 	RubyFrameTypeCmeIseq  = 0x1
 	RubyFrameTypeCmeCfunc = 0x2
 	RubyFrameTypeIseq     = 0x3
-	RubyFrameTypeJit      = 0x4
-	RubyFrameTypeGc       = 0x5
-
-	RubyGcModeNone       = 0x0
-	RubyGcModeMarking    = 0x1
-	RubyGcModeSweeping   = 0x2
-	RubyGcModeCompacting = 0x3
 )
 
 var MetricsTranslation = []metrics.MetricID{

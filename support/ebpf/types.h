@@ -464,28 +464,16 @@ typedef struct RubyProcInfo {
   // version of the Ruby interpreter.
   u32 version;
 
-  // current_ctx_ptr holds the address of the symbol ruby_current_execution_context_ptr.
-  u64 current_ctx_ptr;
-
   // tls_offset holds TLS base + ruby_current_ec tls symbol, as an offset from tpbase
   u64 current_ec_tpbase_tls_offset;
 
-  // JIT regions, for detecting if a native PC was JIT
-  u64 jit_start, jit_end;
+  // current_ctx_ptr holds the address of the symbol ruby_current_execution_context_ptr.
+  u64 current_ctx_ptr;
 
   // Offsets and sizes of Ruby internal structs
 
   // rb_execution_context_struct offsets:
-  u8 vm_stack, vm_stack_size, cfp, thread_ptr;
-
-  // rb_thread_struct offsets
-  u8 thread_vm;
-
-  // rb_vm_struct offsets
-  u16 vm_objspace;
-
-  // rb_objspace offsets
-  u8 objspace_flags, objspace_size_of_flags;
+  u8 vm_stack, vm_stack_size, cfp;
 
   // rb_control_frame_struct offsets:
   u8 pc, iseq, ep, size_of_control_frame_struct;
@@ -686,8 +674,6 @@ typedef struct RubyUnwindState {
   void *last_stack_frame;
   // Framefor last cfunc before we switched to native unwinder
   u64 cfunc_saved_frame;
-  // Detect if JIT code ran in the process (at any time)
-  bool jit_detected;
 } RubyUnwindState;
 
 // Container for additional scratch space needed by the HotSpot unwinder.

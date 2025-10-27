@@ -38,10 +38,6 @@ struct ruby_procs_t {
 #define VM_FRAME_MAGIC_MASK  0x7fff0001
 #define VM_FRAME_MAGIC_CFUNC 0x55550001
 
-// https://github.com/ruby/ruby/blob/v3_4_5/gc/default/default.c#L459-L464
-#define GC_MODE_MASK 0x00000003 // bits 0-1 (2 bits for mode)
-#define GC_DURING_GC (1 << 5)   // bit 5
-
 // Record a Ruby cfp frame
 static EBPF_INLINE ErrorCode
 push_ruby(Trace *trace, u16 flags, u8 frame_type, u64 file, u64 line)
@@ -90,47 +86,6 @@ typedef struct vm_env_struct {
   const void *specval;
   const void *flags;
 } vm_env_t;
-
-static EBPF_INLINE ErrorCode
-gc_check(const RubyProcInfo *rubyinfo, const void *current_ctx_addr, bool *is_gc, u8 *gc_mode)
-{
-  void *thread_ptr;
-  void *vm;
-  void *objspace;
-  u32 gc_flags;
-
-  if (bpf_probe_read_user(
-        &thread_ptr, sizeof(thread_ptr), (void *)(current_ctx_addr + rubyinfo->thread_ptr))) {
-    DEBUG_PRINT("failed to get current thread");
-    return -1;
-  }
-
-  if (bpf_probe_read_user(&vm, sizeof(vm), (void *)(thread_ptr + rubyinfo->thread_vm))) {
-    DEBUG_PRINT("failed to get current vm");
-    return -1;
-  }
-
-  if (bpf_probe_read_user(&objspace, sizeof(objspace), (void *)(vm + rubyinfo->vm_objspace))) {
-    DEBUG_PRINT("failed to get objspace handle");
-    return -1;
-  }
-
-  if (bpf_probe_read_user(
-        &gc_flags, sizeof(gc_flags), (void *)(objspace + rubyinfo->objspace_flags))) {
-    DEBUG_PRINT("failed to get objspace handle");
-    return -1;
-  }
-
-  // DEBUG_PRINT("GC: Got gc flags %x", gc_flags);
-
-  if (gc_flags & GC_DURING_GC) {
-    *is_gc   = true;
-    *gc_mode = (u8)gc_flags & GC_MODE_MASK;
-  } else {
-    *is_gc = false;
-  }
-  return 0;
-}
 
 // walk_ruby_stack processes a Ruby VM stack, extracts information from the individual frames and
 // pushes this information to user space for symbolization of these frames.
@@ -184,23 +139,6 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
 
   Trace *trace   = &record->trace;
   *next_unwinder = PROG_UNWIND_STOP;
-
-  bool is_gc;
-  u8 gc_mode;
-  ErrorCode gc_error = gc_check(rubyinfo, current_ctx_addr, &is_gc, &gc_mode);
-  if (gc_error) {
-    return gc_error;
-  }
-
-  if (is_gc) {
-    // GC is active - skip profiling
-    DEBUG_PRINT("GC: is active, mode is %d", gc_mode);
-    ErrorCode error = push_ruby(trace, 0, FRAME_TYPE_GC, gc_mode, 0);
-    if (error) {
-      return error;
-    }
-    return ERR_OK;
-  }
 
   // stack_ptr points to the frame of the Ruby VM call stack that will be unwound next
   void *stack_ptr        = record->rubyUnwindState.stack_ptr;
@@ -375,36 +313,17 @@ done_check:
     frame_addr = me_or_cref;
 
     if (cfunc) {
-      // if (rubyinfo->version < 0x20600) {
-      //   // With Ruby version 2.6 the scope of our entry symbol ruby_current_execution_context_ptr
-      //   // got extended. We need this extension to jump back unwinding Ruby VM frames if we
-      //   // continue at this point with unwinding native frames.
-      //   // As this is not available for Ruby versions < 2.6 we just skip this indicator frame and
-      //   // continue unwinding Ruby VM frames. Due to this issue, the ordering of Ruby and native
-      //   // frames might not be correct for Ruby versions < 2.6.
-      //   goto skip;
-      // }
-
       frame_type = FRAME_TYPE_CME_CFUNC;
+      // We save this cfp on in the "Record" entry, and when we start the unwinder
+      // again we'll push it so that the order is correct and the cfunc "owns" any native code we
+      // unwound rather than eliding it
+      record->rubyUnwindState.cfunc_saved_frame = frame_addr;
 
-      // NB: We cannot resume native unwinding if JIT, so if we detect we are jit the current only
-      // choice is to just keep walking ruby NOTE - it may be possible for the leaf frame to be a
-      // cframe, calling into jit for now, only push if we know it wasn't a C frame, while we
-      // investigate with yjit/zjit developers how this may be happening. I is possible that jit
-      // frames may elide native frames if we don't push this dummy frame here, this needs to be
-      // investigated further but for now, attribute the CPU to the iseq owner of this jit code
-      if (!record->rubyUnwindState.jit_detected) {
-        // We save this cfp on in the "Record" entry, and when we start the unwinder
-        // again we'll push it so that the order is correct and the cfunc "owns" any native code we
-        // unwound rather than eliding it
-        record->rubyUnwindState.cfunc_saved_frame = frame_addr;
+      // Advance the ruby stack pointer so we will start at the next frame
+      stack_ptr += rubyinfo->size_of_control_frame_struct;
 
-        // Advance the ruby stack pointer so we will start at the next frame
-        stack_ptr += rubyinfo->size_of_control_frame_struct;
-
-        *next_unwinder = PROG_UNWIND_NATIVE;
-        goto save_state;
-      }
+      *next_unwinder = PROG_UNWIND_NATIVE;
+      goto save_state;
     } else {
       // Now we must further verify that it is ISEQ type, but do it out of the loop
       // https://github.com/ruby/ruby/blob/v3_4_5/vm_backtrace.c#L1736
@@ -451,25 +370,6 @@ done_check:
     }
   }
 
-  bool native_pc_is_jit =
-    (rubyinfo->jit_start > 0 && record->state.pc > rubyinfo->jit_start &&
-     record->state.pc < rubyinfo->jit_end);
-  if (native_pc_is_jit) {
-    record->rubyUnwindState.jit_detected = true;
-    DEBUG_PRINT("Detected PC: %llx as JIT frame", (u64)record->state.pc);
-    if (trace->stack_len == 0) {
-      // NB: If the first frame is a jit PC, the leaf ruby frame should be the jit "owner"
-      // NB: with ruby jit perf maps on (even without base pointer, so low perf impact)
-      // we should be able to further symbolize this frame, the format is simple
-      // https://github.com/torvalds/linux/blob/master/tools/perf/Documentation/jit-interface.txt
-      ErrorCode error =
-        push_ruby(trace, frame_flags, FRAME_TYPE_JIT, (u64)record->state.pc, 0);
-      if (error) {
-        return error;
-      }
-    }
-  }
-
   // For symbolization of the frame we forward the information about the instruction sequence
   // and program counter to user space.
   // From this we can then extract information like file or function name and line number.
@@ -481,10 +381,8 @@ done_check:
   increment_metric(metricID_UnwindRubyFrames);
 skip:
   if (last_stack_frame <= stack_ptr) {
-    DEBUG_PRINT("ruby: bottomed out the stack at 0x%llx", (u64)stack_ptr);
     // We have processed all frames in the Ruby VM and can stop here.
-    //*next_unwinder = PROG_UNWIND_NATIVE;
-    *next_unwinder = record->rubyUnwindState.jit_detected ? PROG_UNWIND_STOP : PROG_UNWIND_NATIVE;
+    *next_unwinder = PROG_UNWIND_NATIVE;
     goto save_state;
   }
   stack_ptr += rubyinfo->size_of_control_frame_struct;
@@ -524,12 +422,6 @@ static EBPF_INLINE int unwind_ruby(struct pt_regs *ctx)
   }
 
   increment_metric(metricID_UnwindRubyAttempts);
-
-  // TODO check if the perf record's GC is in the detected JIT address
-  // range, and if it is, store this in unwinder state
-  // we can use this to change our unwinding strategy - if it is JIT
-  // we need to stop at native frames, if it is not jit, we can pass back
-  // to the native unwinder
 
   // Pointer for an address to a rb_execution_context_struct struct.
   void *current_ctx_addr = NULL;
@@ -581,11 +473,6 @@ static EBPF_INLINE int unwind_ruby(struct pt_regs *ctx)
 
   if (!current_ctx_addr) {
     goto exit;
-  }
-  if (
-    rubyinfo->jit_start > 0 && record->state.pc > rubyinfo->jit_start &&
-    record->state.pc < rubyinfo->jit_end) {
-    record->rubyUnwindState.jit_detected = true;
   }
 
   error = walk_ruby_stack(record, rubyinfo, current_ctx_addr, &unwinder);

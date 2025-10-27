@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"math/bits"
-	"os"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -29,12 +28,9 @@ import (
 	"go.opentelemetry.io/ebpf-profiler/libpf/hash"
 	"go.opentelemetry.io/ebpf-profiler/libpf/pfelf"
 	"go.opentelemetry.io/ebpf-profiler/libpf/pfunsafe"
-	"go.opentelemetry.io/ebpf-profiler/lpm"
 	"go.opentelemetry.io/ebpf-profiler/metrics"
 	npsr "go.opentelemetry.io/ebpf-profiler/nopanicslicereader"
-	"go.opentelemetry.io/ebpf-profiler/process"
 	"go.opentelemetry.io/ebpf-profiler/remotememory"
-	"go.opentelemetry.io/ebpf-profiler/reporter"
 	"go.opentelemetry.io/ebpf-profiler/successfailurecounter"
 	"go.opentelemetry.io/ebpf-profiler/support"
 	"go.opentelemetry.io/ebpf-profiler/util"
@@ -95,15 +91,9 @@ const (
 	// ISEQ_TYPE_METHOD
 	// https://github.com/ruby/ruby/blob/v3_4_5/vm_core.h#L380
 	iseqTypeMethod = 1
-
-	rubyCurrentEcTlsSymbol = "ruby_current_ec"
 )
 
 const (
-	VM_ENV_DATA_INDEX_ME_CREF = 2 * 8 // FIXME don't just multiply by 8
-	VM_ENV_DATA_INDEX_SPECVAL = 1 * 8
-	VM_ENV_FLAG_LOCAL         = 0x02
-
 	// https://github.com/ruby/ruby/blob/1d1529629ce1550fad19c2d9410c4bf4995230d2/include/ruby/internal/fl_type.h#L158
 	RUBY_FL_USHIFT = 12
 	// https://github.com/ruby/ruby/blob/1d1529629ce1550fad19c2d9410c4bf4995230d2/include/ruby/internal/fl_type.h#L323-L324
@@ -130,11 +120,6 @@ const (
 
 	// https://github.com/ruby/ruby/blob/1d1529629ce1550fad19c2d9410c4bf4995230d2/include/ruby/internal/fl_type.h#L394
 	RUBY_FL_SINGLETON = RUBY_FL_USER1
-
-	IMEMO_MASK = 0x0f
-	IMEMO_CREF = 1 /*!< class reference */
-	IMEMO_SVAR = 2 /*!< special variable */
-	IMEMO_MENT = 6
 )
 
 var (
@@ -145,13 +130,6 @@ var (
 
 	rubyProcessDied   = libpf.Intern("PROCESS_DIED")
 	rubyDeadFile      = libpf.Intern("<dead>")
-	rubyJitDummyFrame = libpf.Intern("UNKNOWN JIT CODE")
-	rubyJitDummyFile  = libpf.Intern("<jitted code>")
-	rubyGcRunning     = libpf.Intern("GC_RUNNING")
-	rubyGcMarking     = libpf.Intern("GC_MARKING")
-	rubyGcSweeping    = libpf.Intern("GC_SWEEPING")
-	rubyGcCompacting  = libpf.Intern("GC_COMPACTING")
-	rubyGcDummyFile   = libpf.Intern("gc.c")
 
 	// compiler check to make sure the needed interfaces are satisfied
 	_ interpreter.Data     = &rubyData{}
@@ -178,23 +156,7 @@ type rubyData struct {
 		// rb_execution_context_struct
 		// https://github.com/ruby/ruby/blob/5445e0435260b449decf2ac16f9d09bae3cafe72/vm_core.h#L843
 		execution_context_struct struct {
-			vm_stack, vm_stack_size, cfp, thread_ptr uint8
-		}
-
-		// https://github.com/ruby/ruby/blob/v3_4_5/vm_core.h#L1108
-		thread_struct struct {
-			vm uint8
-		}
-
-		// https://github.com/ruby/ruby/blob/v3_4_5/vm_core.h#L666
-		vm_struct struct {
-			gc_objspace uint16
-		}
-
-		// https://github.com/ruby/ruby/blob/v3_4_5/gc/default/default.c#L445
-		objspace struct {
-			flags         uint8
-			size_of_flags uint8
+			vm_stack, vm_stack_size, cfp uint8
 		}
 
 		// rb_control_frame_struct
@@ -311,13 +273,6 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 		Vm_stack:      r.vmStructs.execution_context_struct.vm_stack,
 		Vm_stack_size: r.vmStructs.execution_context_struct.vm_stack_size,
 		Cfp:           r.vmStructs.execution_context_struct.cfp,
-		Thread_ptr:    r.vmStructs.execution_context_struct.thread_ptr,
-
-		Thread_vm:   r.vmStructs.thread_struct.vm,
-		Vm_objspace: r.vmStructs.vm_struct.gc_objspace,
-
-		Objspace_flags:         r.vmStructs.objspace.flags,
-		Objspace_size_of_flags: r.vmStructs.objspace.size_of_flags,
 
 		Pc:                           r.vmStructs.control_frame_struct.pc,
 		Iseq:                         r.vmStructs.control_frame_struct.iseq,
@@ -360,8 +315,6 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 		// https://github.com/open-telemetry/opentelemetry-ebpf-profiler/commit/97be3669b0f0d66f52ff9d6d33cd482f4eddb6d6
 		cmeCache:             cmeCache,
 		addrToString:         addrToString,
-		mappings:             make(map[process.Mapping]*uint32),
-		prefixes:             make(map[lpm.Prefix]*uint32),
 		memPool: sync.Pool{
 			New: func() any {
 				buf := make([]byte, 512)
@@ -439,6 +392,8 @@ type rubyInstance struct {
 	rm remotememory.RemoteMemory
 
 	procInfo          support.RubyProcInfo
+
+	// globalSymbolsAddr is the offset of the global symbol table, for looking up ruby symbolic ids
 	globalSymbolsAddr libpf.Address
 	// iseqBodyPCToFunction maps an address and Ruby VM program counter combination to extracted
 	// information from a Ruby instruction sequence object.
@@ -447,8 +402,6 @@ type rubyInstance struct {
 	// cmeCache maps a CME address to the symbolized info
 	cmeCache *freelru.LRU[libpf.Address, *rubyCme]
 
-	//// Ruby JIT mappings
-	jitMap *PerfMap
 	// addrToString maps an address to an extracted Ruby String from this address.
 	addrToString *freelru.LRU[libpf.Address, libpf.String]
 
@@ -458,13 +411,6 @@ type rubyInstance struct {
 	// maxSize is the largest number we did see in the last reporting interval for size
 	// in getRubyLineNo.
 	maxSize atomic.Uint32
-
-	// mappings is indexed by the Mapping to its generation
-	mappings map[process.Mapping]*uint32
-	// prefixes is indexed by the prefix added to ebpf maps (to be cleaned up) to its generation
-	prefixes map[lpm.Prefix]*uint32
-	// mappingGeneration is the current generation (so old entries can be pruned)
-	mappingGeneration uint32
 }
 
 func (r *rubyInstance) Detach(ebpf interpreter.EbpfHandler, pid libpf.PID) error {
@@ -1068,106 +1014,6 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, cmeFrameType uint8
 	return classPath, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, nil
 }
 
-func (r *rubyInstance) SynchronizeMappings(ebpf interpreter.EbpfHandler,
-	_ reporter.ExecutableReporter, pr process.Process, mappings []process.Mapping) error {
-	log.Debugf("Synchronizing ruby mappings")
-	pid := pr.PID()
-	r.mappingGeneration++
-	var jitMapping *process.Mapping
-	jitFound := false
-	for idx := range mappings {
-		m := &mappings[idx]
-		if !m.IsExecutable() || !m.IsAnonymous() {
-			continue
-		}
-		// If prctl is allowed, ruby should label the memory region
-		// always prefer that
-		if strings.Contains(m.Path.String(), "jit_reserve_addr_space") {
-			jitMapping = m
-			jitFound = true
-		}
-		// Use the first executable anon region we find if it isn't labeled
-		// If we find more, prefer ones earlier in memory or larger in size
-		if !jitFound && (jitMapping == nil || m.Vaddr < jitMapping.Vaddr || m.Length > jitMapping.Length) {
-			// Don't set jitFound here as it is a heuristic, we aren't sure
-			// could be on a system without linux config flag to allow prctl to label memoy
-			jitMapping = m
-		}
-
-		if _, exists := r.mappings[*m]; exists {
-			*r.mappings[*m] = r.mappingGeneration
-			continue
-		}
-
-		// Generate a new uint32 pointer which is shared for mapping and the prefixes it owns
-		// so updating the mapping above will reflect to prefixes also.
-		mappingGeneration := r.mappingGeneration
-		r.mappings[*m] = &mappingGeneration
-
-		// Just assume all anonymous and executable mappings are Ruby for now
-		log.Debugf("Enabling Ruby interpreter for %#x/%#x", m.Vaddr, m.Length)
-
-		prefixes, err := lpm.CalculatePrefixList(m.Vaddr, m.Vaddr+m.Length)
-		if err != nil {
-			return fmt.Errorf("new anonymous mapping lpm failure %#x/%#x", m.Vaddr, m.Length)
-		}
-
-		for _, prefix := range prefixes {
-			_, exists := r.prefixes[prefix]
-			if !exists {
-				err := ebpf.UpdatePidInterpreterMapping(pid, prefix, support.ProgUnwindRuby, 0, 0)
-				if err != nil {
-					return err
-				}
-			}
-			r.prefixes[prefix] = &mappingGeneration
-		}
-	}
-	if jitMapping != nil && (r.procInfo.Jit_start != jitMapping.Vaddr || r.procInfo.Jit_end != jitMapping.Vaddr+jitMapping.Length) {
-		r.procInfo.Jit_start = jitMapping.Vaddr
-		r.procInfo.Jit_end = jitMapping.Vaddr + jitMapping.Length
-		if err := ebpf.UpdateProcData(libpf.Ruby, pr.PID(), unsafe.Pointer(&r.procInfo)); err != nil {
-			return err
-		}
-		log.Debugf("Added jit mapping %08x ruby proc info, %08x", r.procInfo.Jit_start, r.procInfo.Jit_end)
-
-		if r.jitMap == nil {
-			// Check for jit interface here, store the path to the file so we can
-			// lookup the jit PCs rather than push a dummy frame
-			jitFile := fmt.Sprintf("/tmp/perf-%d.map", pr.PID())
-			if _, err := os.Stat(jitFile); err != nil {
-				log.Warnf("Jit mapping not found for ruby process at %s", jitFile)
-			} else {
-				perfMap := NewPerfMap()
-				if err := perfMap.ParseFile(jitFile); err != nil {
-					log.Errorf("Unable to parse perf map at %s, %v", jitFile, err)
-				} else {
-					log.Debugf("Loaded perf map from %s, stats: %s", jitFile, perfMap.Stats())
-					r.jitMap = perfMap
-				}
-			}
-		}
-	}
-	// Remove prefixes not seen
-	for prefix, generationPtr := range r.prefixes {
-		if *generationPtr == r.mappingGeneration {
-			continue
-		}
-		log.Debugf("Delete Ruby prefix %#v", prefix)
-		_ = ebpf.DeletePidInterpreterMapping(pid, prefix)
-		delete(r.prefixes, prefix)
-	}
-	for m, generationPtr := range r.mappings {
-		if *generationPtr == r.mappingGeneration {
-			continue
-		}
-		log.Debugf("Disabling Ruby for %#x/%#x", m.Vaddr, m.Length)
-		delete(r.mappings, m)
-	}
-
-	return nil
-}
-
 func processDied(frames *libpf.Frames) {
 	frames.Append(&libpf.Frame{
 		Type:         libpf.RubyFrame,
@@ -1344,51 +1190,6 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		}
 	case support.RubyFrameTypeIseq:
 		iseqBody = libpf.Address(frameAddr)
-	case support.RubyFrameTypeGc:
-		gcMode := frameAddr
-		var gcModeStr libpf.String
-		switch gcMode {
-		case support.RubyGcModeNone:
-			gcModeStr = rubyGcRunning
-		case support.RubyGcModeMarking:
-			gcModeStr = rubyGcMarking
-		case support.RubyGcModeSweeping:
-			gcModeStr = rubyGcSweeping
-		case support.RubyGcModeCompacting:
-			gcModeStr = rubyGcCompacting
-		}
-
-		// TODO append a second frame if we are marking, sweeping, or compacting, to nest on "gcModeRunning"?
-		frames.Append(&libpf.Frame{
-			Type:         libpf.RubyFrame,
-			FunctionName: gcModeStr,
-			SourceFile:   rubyGcDummyFile,
-			SourceLine:   0,
-		})
-		return nil
-	case support.RubyFrameTypeJit:
-		label := rubyJitDummyFrame
-		if r.jitMap != nil {
-			jitSymbol, ok, err := r.jitMap.LookupWithReload(uint64(frameAddr))
-			if err != nil {
-				log.Errorf("Error loading looking up jit symbol for PC %08X: %v", frameAddr, err)
-			}
-			if !ok {
-				log.Warnf("JIT: Unable to lookup PC %08x, map stats: %s", frameAddr, r.jitMap.Stats())
-			} else {
-				log.Debugf("Found JIT symbol %s for PC %08X", jitSymbol.Name, frameAddr)
-				label = libpf.Intern(jitSymbol.Name)
-			}
-		} else {
-			log.Warnf("JIT: unable to symbolize, no jit mapping loaded")
-		}
-		frames.Append(&libpf.Frame{
-			Type:         libpf.RubyFrame,
-			FunctionName: label,
-			SourceFile:   rubyJitDummyFile,
-			SourceLine:   0,
-		})
-		return nil
 	default:
 		err = fmt.Errorf("Unable to get CME or ISEQ from frame address")
 	}
@@ -1728,30 +1529,6 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 	vms.execution_context_struct.vm_stack = 0
 	vms.execution_context_struct.vm_stack_size = 8
 	vms.execution_context_struct.cfp = 16
-	vms.execution_context_struct.thread_ptr = 48
-
-	vms.thread_struct.vm = 32 // FIXME this is very ruby version dependent, ractor comes before it
-
-	// Package and sizes varies a lot for this rather large struct between two arches
-	if runtime.GOARCH == "amd64" {
-		// x86_64:
-		//        struct {
-		//                struct rb_objspace * objspace;           /*  1296     8 */
-		//                struct gc_mark_func_data_struct * mark_func_data; /*  1304     8 */
-		//        } gc;
-		vms.vm_struct.gc_objspace = 1296 // FIXME this is very ruby version dependent, ractor comes before it
-	} else {
-		// arm64:
-		//        struct {
-		//                struct rb_objspace * objspace;           /*  1320     8 */
-		//                struct gc_mark_func_data_struct * mark_func_data; /*  1328     8 */
-		//        } gc;                                            /*  1320    16 */
-
-		vms.vm_struct.gc_objspace = 1320 // FIXME this is very ruby version dependent, ractor comes before it
-	}
-
-	vms.objspace.flags = 20
-	vms.objspace.size_of_flags = 4
 
 	vms.control_frame_struct.pc = 0
 	vms.control_frame_struct.iseq = 16
