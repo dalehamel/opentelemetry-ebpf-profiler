@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"math/bits"
 	"regexp"
 	"runtime"
@@ -25,7 +24,6 @@ import (
 	"go.opentelemetry.io/ebpf-profiler/host"
 	"go.opentelemetry.io/ebpf-profiler/interpreter"
 	"go.opentelemetry.io/ebpf-profiler/libpf"
-	"go.opentelemetry.io/ebpf-profiler/libpf/hash"
 	"go.opentelemetry.io/ebpf-profiler/libpf/pfelf"
 	"go.opentelemetry.io/ebpf-profiler/libpf/pfunsafe"
 	"go.opentelemetry.io/ebpf-profiler/metrics"
@@ -40,8 +38,6 @@ const (
 	// iseqCacheSize is the LRU size for caching Ruby instruction sequences for an interpreter.
 	// This should reflect the number of hot functions that are seen often in a trace.
 	iseqCacheSize = 1024
-	// cmeCacheSize
-	cmeCacheSize = 8192
 	// addrToStringSize is the LRU size for caching Ruby VM addresses to Ruby strings.
 	addrToStringSize = 1024
 
@@ -291,13 +287,6 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 		return nil, err
 	}
 
-	// TODO delete me
-	cmeCache, err := freelru.New[libpf.Address, *rubyCme](cmeCacheSize,
-		hashCme)
-	if err != nil {
-		return nil, err
-	}
-
 	addrToString, err := freelru.New[libpf.Address, libpf.String](addrToStringSize,
 		libpf.Address.Hash32)
 	if err != nil {
@@ -311,9 +300,6 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 		rm:                rm,
 		procInfo:          cdata,
 		globalSymbolsAddr: r.globalSymbolsAddr + bias,
-		// TODO - we can probably just rely on the frame cache added in
-		// https://github.com/open-telemetry/opentelemetry-ebpf-profiler/commit/97be3669b0f0d66f52ff9d6d33cd482f4eddb6d6
-		cmeCache:             cmeCache,
 		addrToString:         addrToString,
 		memPool: sync.Pool{
 			New: func() any {
@@ -325,43 +311,6 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 }
 
 func (r *rubyData) Unload(_ interpreter.EbpfHandler) {
-}
-
-// rubyIseqBodyPC holds a reported address to a iseq_constant_body and Ruby VM program counter
-// combination and is used as key in the cache.
-type rubyIseqBodyPC struct {
-	addr libpf.Address
-	pc   uint64
-}
-
-func hashRubyIseqBodyPC(iseq rubyIseqBodyPC) uint32 {
-	h := iseq.addr.Hash()
-	h ^= hash.Uint64(iseq.pc)
-	return uint32(h)
-}
-
-func hashCme(cme libpf.Address) uint32 {
-	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], uint64(cme)&0xFFFFFFFFFFFF)
-	return crc32.ChecksumIEEE(buf[:6])
-}
-
-// rubyIseq stores information extracted from a iseq_constant_body struct.
-type rubyCme struct {
-	// classname for the
-	classPath libpf.String
-
-	// method id for CMEs containing cfuncs
-	methodName libpf.String
-
-	// filename (currently only a dummy one for cfuncs)
-	sourceFile libpf.String
-
-	cframe bool
-
-	singleton bool
-
-	iseq rubyIseq
 }
 
 // rubyIseq stores information extracted from a iseq_constant_body struct.
@@ -395,12 +344,6 @@ type rubyInstance struct {
 
 	// globalSymbolsAddr is the offset of the global symbol table, for looking up ruby symbolic ids
 	globalSymbolsAddr libpf.Address
-	// iseqBodyPCToFunction maps an address and Ruby VM program counter combination to extracted
-	// information from a Ruby instruction sequence object.
-	iseqBodyPCToFunction *freelru.LRU[rubyIseqBodyPC, *rubyIseq]
-
-	// cmeCache maps a CME address to the symbolized info
-	cmeCache *freelru.LRU[libpf.Address, *rubyCme]
 
 	// addrToString maps an address to an extracted Ruby String from this address.
 	addrToString *freelru.LRU[libpf.Address, libpf.String]
@@ -1151,8 +1094,6 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	var iseq *rubyIseq
 	var singleton bool
 	var cframe bool
-	var cmeEntry *rubyCme
-	var cmeHit bool
 
 	frameAddr := libpf.Address(frame.File & support.RubyAddrMask48Bit)
 	frameAddrType := uint8(frame.File >> 48)
@@ -1163,31 +1104,21 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	switch frameAddrType {
 	case support.RubyFrameTypeCmeIseq, support.RubyFrameTypeCmeCfunc:
 		cme = frameAddr
-		cmeEntry, cmeHit = r.cmeCache.Get(cme)
-		if !cmeHit {
-			if _, err := r.PtrCheck(cme); err != nil && errors.Is(err, syscall.ESRCH) {
-				processDied(frames)
-				// Keep going in case other frames were cached
-				return nil
-			}
-			// TODO if the process is dead and we didn't get a hit, insert a special dummy frame
-			cmeEntry = &rubyCme{}
-			//log.Debugf("Got ruby CME at 0x%08x", cme)
-			classPath, methodName, sourceFile, singleton, cframe, iseqBody, err = r.processCmeFrame(cme, frameAddrType)
-			if err != nil {
-				log.Errorf("Tried and failed to process as CME frame %v", err)
-			}
-			//if frameAddrType == support.RubyFrameTypeCmeIseq && iseqBody != libpf.Address(frame.Extra) {
-			//	log.Debugf("Mismatched iseq body addrs %04X %08X %08X, preferring BPF", frameFlags, iseqBody, frame.Extra)
-			//	iseqBody = libpf.Address(frame.Extra)
-			//}
-		} else {
-			classPath = cmeEntry.classPath
-			methodName = cmeEntry.methodName
-			sourceFile = cmeEntry.sourceFile
-			singleton = cmeEntry.singleton
-			cframe = cmeEntry.cframe
+		if _, err := r.PtrCheck(cme); err != nil && errors.Is(err, syscall.ESRCH) {
+			processDied(frames)
+			// Keep going in case other frames were cached
+			return nil
 		}
+		//log.Debugf("Got ruby CME at 0x%08x", cme)
+		classPath, methodName, sourceFile, singleton, cframe, iseqBody, err = r.processCmeFrame(cme, frameAddrType)
+		if err != nil {
+			log.Errorf("Tried and failed to process as CME frame %v", err)
+			// TODO if the process is dead and we didn't get a hit, insert a special dummy frame
+		}
+		//if frameAddrType == support.RubyFrameTypeCmeIseq && iseqBody != libpf.Address(frame.Extra) {
+		//	log.Debugf("Mismatched iseq body addrs %04X %08X %08X, preferring BPF", frameFlags, iseqBody, frame.Extra)
+		//	iseqBody = libpf.Address(frame.Extra)
+		//}
 	case support.RubyFrameTypeIseq:
 		iseqBody = libpf.Address(frameAddr)
 	default:
@@ -1201,11 +1132,6 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	if methodName == libpf.NullString {
 		// The Ruby VM program counter that was extracted from the current call frame is embedded in
 		// the Linenos field.
-
-		//key := rubyIseqBodyPC{
-		//	addr: iseqBody,
-		//	pc:   uint64(pc),
-		//}
 
 		//var ok bool
 
@@ -1240,20 +1166,6 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		sourceLine = iseq.line
 	}
 
-	if (frameAddrType == support.RubyFrameTypeCmeIseq || frameAddrType == support.RubyFrameTypeCmeCfunc) && !cmeHit {
-		cmeEntry = &rubyCme{
-			classPath:  classPath,
-			methodName: methodName,
-			sourceFile: sourceFile,
-			singleton:  singleton,
-			cframe:     cframe,
-		}
-		if iseq != nil {
-			cmeEntry.iseq = *iseq
-		}
-		r.cmeCache.Add(cme, cmeEntry)
-	}
-
 	// TODO we need to duplicate the exact logic of
 	// rb_profile_frame_full_label
 	fullLabel := profileFrameFullLabel(classPath, label, baseLabel, methodName, singleton, cframe)
@@ -1264,7 +1176,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	// Ruby doesn't provide the information about the function offset for the
 	// particular line. So we report 0 for this to our backend.
 
-	log.Debugf("cache: %t, flags (%s) (method: %s, label: %s, base: %s), (%d) %04x ", cmeHit, fullLabel.String(), methodName.String(), label.String(), baseLabel.String(), frameAddrType, frameFlags)
+	log.Debugf("flags (%s) (method: %s, label: %s, base: %s), (%d) %04x ", fullLabel.String(), methodName.String(), label.String(), baseLabel.String(), frameAddrType, frameFlags)
 	frames.Append(&libpf.Frame{
 		Type:         libpf.RubyFrame,
 		FunctionName: fullLabel,
