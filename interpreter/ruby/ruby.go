@@ -920,19 +920,6 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, cmeFrameType uint8
 		log.Debugf("Got cfunc name %s", cfuncName)
 		return classPath, cfuncName, libpf.Intern("<cfunc>"), singleton, cframe, iseqBody, nil
 	} else {
-
-		// TODO delete me, we should trust the values from BPF
-		// We do a direct read, as a value of 0 would be mistaken for ISEQ type
-		var buf [1]byte
-		if err := r.rm.Read(methodDefinition+libpf.Address(vms.rb_method_definition_struct.method_type), buf[:]); err != nil {
-			return libpf.NullString, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, fmt.Errorf("Unable to read method type, CME (%08x) is corrupt, method def %08X, %v", cmeAddr, methodDefinition, err)
-		}
-
-		// NOTE - it is stored in a bitfield of size 4, so we must mask with 0xF
-		// https://github.com/ruby/ruby/blob/5e817f98af9024f34a3491c0aa6526d1191f8c11/method.h#L188
-		methodType := buf[0] & 0xF
-		log.Debugf("Method type %x", methodType)
-
 		classDefinition := r.rm.Ptr(cmeAddr + libpf.Address(vms.rb_method_entry_struct.defined_class))
 		classPath, singleton, err = r.readClassName(classDefinition)
 		if err != nil {
@@ -951,7 +938,6 @@ func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, cmeFrameType uint8
 			log.Errorf("iseq body was empty")
 			return libpf.NullString, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, fmt.Errorf("unable to read iseq body")
 		}
-		//log.Debugf("Read CME successfully %s %08x", classPath.String(), iseqBody)
 	}
 
 	return classPath, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, nil
@@ -1115,10 +1101,6 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 			log.Errorf("Tried and failed to process as CME frame %v", err)
 			// TODO if the process is dead and we didn't get a hit, insert a special dummy frame
 		}
-		//if frameAddrType == support.RubyFrameTypeCmeIseq && iseqBody != libpf.Address(frame.Extra) {
-		//	log.Debugf("Mismatched iseq body addrs %04X %08X %08X, preferring BPF", frameFlags, iseqBody, frame.Extra)
-		//	iseqBody = libpf.Address(frame.Extra)
-		//}
 	case support.RubyFrameTypeIseq:
 		iseqBody = libpf.Address(frameAddr)
 	default:
@@ -1132,15 +1114,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	if methodName == libpf.NullString {
 		// The Ruby VM program counter that was extracted from the current call frame is embedded in
 		// the Linenos field.
-
-		//var ok bool
-
 		if iseq == nil {
-		//	iseq, ok = r.iseqBodyPCToFunction.Get(key)
-		//} else {
-		//	ok = true
-		//}
-		//if !ok {
 			iseq, err = r.readIseqBody(iseqBody, pc, frameAddrType, frameFlags)
 			if err != nil {
 				if errors.Is(err, syscall.ESRCH) {
@@ -1148,16 +1122,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 					return nil
 				}
 				log.Debugf("iseq body read failed: %v", err)
-				//if frameAddrType == support.RubyFrameTypeCmeIseq {
-				//	iseq, err = r.readIseqBody(libpf.Address(frame.Extra), pc, frameAddrType, frameFlags)
-				//	if err != nil {
-				//		log.Debugf("iseq read (attempt 2): %v", err)
-				//	}
-				//}
-			}// else {
-			//	key.addr = iseqBody
-			//	r.iseqBodyPCToFunction.Add(key, iseq)
-			//}
+			}
 		}
 		methodName = iseq.functionName
 		label = iseq.label
@@ -1166,8 +1131,6 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		sourceLine = iseq.line
 	}
 
-	// TODO we need to duplicate the exact logic of
-	// rb_profile_frame_full_label
 	fullLabel := profileFrameFullLabel(classPath, label, baseLabel, methodName, singleton, cframe)
 
 	if fullLabel == libpf.NullString {
@@ -1204,7 +1167,6 @@ func qualifiedMethodName(classPath, methodName libpf.String, singleton bool) lib
 
 // TODO make some tests for profileFullLabelName to cover the various cases it needs
 // to handle correctly
-// TODO this should be saved in the cache, we shouldn't unconditionally run this
 func profileFrameFullLabel(classPath, label, baseLabel, methodName libpf.String, singleton, cframe bool) libpf.String {
 	qualified := qualifiedMethodName(classPath, methodName, singleton)
 
@@ -1230,11 +1192,6 @@ func profileFrameFullLabel(classPath, label, baseLabel, methodName libpf.String,
 	}
 
 	profileLabel := label.String()[:prefixLen] + qualified.String()
-
-	//log.Debugf("label: %s", label.String())
-	//log.Debugf("base_label: %s", baseLabel.String())
-	//log.Debugf("qualified: %s", qualified.String())
-	//log.Debugf("profile label: %s", profileLabel)
 
 	if len(profileLabel) == 0 {
 		return libpf.NullString
