@@ -140,6 +140,7 @@ read_ep:
   }
   cfunc = (((frame_flags & VM_FRAME_MAGIC_MASK) == VM_FRAME_MAGIC_CFUNC) || pc == 0);
 
+  // Store the frame flags for debugging purposes in case symbolization fails
   // Extract high byte (nibbles 6-7)
   u16 high_byte    = (frame_flags >> 24) & 0xFF;
   u16 low_byte     = (frame_flags >> 4) & 0xFF;
@@ -216,6 +217,7 @@ done_check:
       stack_ptr += rubyinfo->size_of_control_frame_struct;
 
       *next_unwinder = PROG_UNWIND_NATIVE;
+      DEBUG_PRINT("ruby: got cfunc, next unwinder is %d", *next_unwinder);
       // Return early as we don't want to push this frame until we return to ruby unwinder
       return ERR_OK;
     } else {
@@ -391,7 +393,8 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
 read_frame:
   error = read_ruby_frame(record, rubyinfo, stack_ptr, next_unwinder);
   if (error != ERR_OK)
-    return error;
+    DEBUG_PRINT("ruby: ERROR READING FRAME %d", error);
+    //return error;
 
   if (last_stack_frame <= stack_ptr)
     *next_unwinder = PROG_UNWIND_NATIVE;
