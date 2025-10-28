@@ -320,11 +320,13 @@ type rubyIseq struct {
 
 	// label
 	label libpf.String
+
 	// base_label
 	baseLabel libpf.String
 
-	// functionName is the function name for this sequence
-	functionName libpf.String
+	// methodName is the optional method name for this iseq
+	// only present on CME-based iseq
+	methodName libpf.String
 
 	// line of code in source file for this instruction sequence
 	line libpf.SourceLineno
@@ -885,73 +887,6 @@ func (r *rubyInstance) PtrCheck(addr libpf.Address) (libpf.Address, error) {
 	return libpf.Address(binary.LittleEndian.Uint64(buf[:])) - r.rm.Bias, nil
 }
 
-// TODO refactor into cframe / iseq handlers
-func (r *rubyInstance) processCmeFrame(cmeAddr libpf.Address, cmeFrameType uint8) (libpf.String, libpf.String, libpf.String, bool, bool, libpf.Address, error) {
-	// Get the classpath, and figure out the iseq body offset from the definition
-	// so that we can get the name and line number as below
-
-	var classPath libpf.String
-	var iseqBody libpf.Address
-	var singleton bool
-	var cframe bool
-	var err error
-
-	vms := &r.r.vmStructs
-	//log.Debugf("Got Ruby CME frame %X", cmeAddr)
-
-	methodDefinition, err := r.PtrCheck(cmeAddr + libpf.Address(vms.rb_method_entry_struct.def))
-	if err != nil {
-		return libpf.NullString, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, fmt.Errorf("Unable to read method definition, CME (%08x) %v", cmeAddr, err)
-	}
-
-	if cmeFrameType == support.RubyFrameTypeCmeCfunc {
-		var cfuncName libpf.String
-		cframe = true
-		classDefinition := r.rm.Ptr(cmeAddr + libpf.Address(vms.rb_method_entry_struct.owner))
-		classPath, singleton, err = r.readClassName(classDefinition)
-		if err != nil {
-			log.Errorf("Failed to read class name from owner for cfunc: %v", err)
-		} else {
-			log.Debugf("Got %s for cfunc owner", classPath)
-		}
-		originalId := r.rm.Uint64(methodDefinition + libpf.Address(vms.rb_method_definition_struct.original_id))
-
-		cfuncName, err = r.id2str(originalId)
-		log.Debugf("Got cfunc name %s", cfuncName)
-		return classPath, cfuncName, libpf.Intern("<cfunc>"), singleton, cframe, iseqBody, nil
-	} else {
-		classDefinition := r.rm.Ptr(cmeAddr + libpf.Address(vms.rb_method_entry_struct.defined_class))
-		classPath, singleton, err = r.readClassName(classDefinition)
-		if err != nil {
-			log.Errorf("Failed to read class name for iseq: %v", err)
-		}
-
-		methodBody := r.rm.Ptr(methodDefinition + libpf.Address(vms.rb_method_definition_struct.body))
-		if methodBody == 0 {
-			log.Errorf("method body was empty")
-			return classPath, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, fmt.Errorf("unable to read method body, classpath: %s", classPath.String())
-		}
-
-		iseqBody = r.rm.Ptr(methodBody + libpf.Address(vms.rb_method_iseq_struct.iseqptr+vms.iseq_struct.body))
-
-		if iseqBody == 0 {
-			log.Errorf("iseq body was empty")
-			return libpf.NullString, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, fmt.Errorf("unable to read iseq body")
-		}
-	}
-
-	return classPath, libpf.NullString, libpf.NullString, singleton, cframe, iseqBody, nil
-}
-
-func processDied(frames *libpf.Frames) {
-	frames.Append(&libpf.Frame{
-		Type:         libpf.RubyFrame,
-		FunctionName: rubyProcessDied,
-		SourceFile:   rubyDeadFile,
-		SourceLine:   0,
-	})
-}
-
 // Reconstructing (expanding back to 32 bits with 0xF fill)
 func unpackEnvFlags(packed uint16) uint32 {
 	// Extract the saved bytes
@@ -1053,9 +988,9 @@ func (r *rubyInstance) readIseqBody(iseqBody, pc libpf.Address, frameAddrType ui
 	}
 
 	return &rubyIseq{
-		functionName:   methodName,
 		label:          iseqLabel,
 		baseLabel:      iseqBaseLabel,
+		methodName:     methodName,
 		sourceFileName: sourceFileName,
 		line:           libpf.SourceLineno(lineNo),
 	}, nil
@@ -1069,18 +1004,16 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	defer sfCounter.DefaultToFailure()
 
 	var err error
-	var cme libpf.Address
 	var iseqBody libpf.Address
 	var classPath libpf.String
 	var methodName libpf.String
-	var label libpf.String
-	var baseLabel libpf.String
+	var fullLabel libpf.String
 	var sourceFile libpf.String
 	var sourceLine libpf.SourceLineno
-	var iseq *rubyIseq
 	var singleton bool
 	var cframe bool
 
+	vms := &r.r.vmStructs
 	frameAddr := libpf.Address(frame.File & support.RubyAddrMask48Bit)
 	frameAddrType := uint8(frame.File >> 48)
 	pc := libpf.Address(frame.Lineno & support.RubyAddrMask48Bit)
@@ -1088,19 +1021,54 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	frameFlags := unpackEnvFlags(uint16(frame.Lineno >> 48))
 
 	switch frameAddrType {
-	case support.RubyFrameTypeCmeIseq, support.RubyFrameTypeCmeCfunc:
-		cme = frameAddr
-		if _, err := r.PtrCheck(cme); err != nil && errors.Is(err, syscall.ESRCH) {
-			processDied(frames)
-			// Keep going in case other frames were cached
-			return nil
-		}
-		//log.Debugf("Got ruby CME at 0x%08x", cme)
-		classPath, methodName, sourceFile, singleton, cframe, iseqBody, err = r.processCmeFrame(cme, frameAddrType)
+	case support.RubyFrameTypeCmeCfunc:
+	  methodDefinition, err := r.PtrCheck(frameAddr + libpf.Address(vms.rb_method_entry_struct.def))
+	  if err != nil {
+			log.Errorf("%w", err)
+			return err
+	  }
+
+		cframe = true
+		classDefinition := r.rm.Ptr(frameAddr + libpf.Address(vms.rb_method_entry_struct.owner))
+		// TODO version gate this
+		classPath, singleton, err = r.readClassName(classDefinition)
 		if err != nil {
-			log.Errorf("Tried and failed to process as CME frame %v", err)
-			// TODO if the process is dead and we didn't get a hit, insert a special dummy frame
+			log.Errorf("Failed to read class name from owner for cfunc: %v", err)
+		} else {
+			log.Debugf("Got %s for cfunc owner", classPath)
 		}
+		originalId := r.rm.Uint64(methodDefinition + libpf.Address(vms.rb_method_definition_struct.original_id))
+
+		methodName, err = r.id2str(originalId)
+		log.Debugf("Got cfunc name %s", methodName)
+	case support.RubyFrameTypeCmeIseq:
+
+	  methodDefinition, err := r.PtrCheck(frameAddr + libpf.Address(vms.rb_method_entry_struct.def))
+	  if err != nil {
+			log.Errorf("%w", err)
+	  	return fmt.Errorf("Unable to read method definition, CME (%08x) %v", frameAddr, err)
+	  }
+
+		classDefinition := r.rm.Ptr(frameAddr + libpf.Address(vms.rb_method_entry_struct.defined_class))
+
+		// TODO version gate this
+		classPath, singleton, err = r.readClassName(classDefinition)
+		if err != nil {
+			log.Errorf("Failed to read class name for iseq: %v", err)
+		}
+
+		methodBody := r.rm.Ptr(methodDefinition + libpf.Address(vms.rb_method_definition_struct.body))
+		if methodBody == 0 {
+			log.Errorf("%w", err)
+			return fmt.Errorf("unable to read method body, classpath: %s", classPath.String())
+		}
+
+		iseqBody = r.rm.Ptr(methodBody + libpf.Address(vms.rb_method_iseq_struct.iseqptr+vms.iseq_struct.body))
+
+		if iseqBody == 0 {
+			err = fmt.Errorf("unable to read iseq body")
+		}
+
 	case support.RubyFrameTypeIseq:
 		iseqBody = libpf.Address(frameAddr)
 	default:
@@ -1109,37 +1077,34 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 
 	if err != nil {
 		log.Errorf("Couldn't handle frame (%d) (%04x) 0x%08x (pc: 0x%08x) as %d frame %08x %v", frameAddrType, frameFlags, frameAddr, pc, frameAddrType, iseqBody, err)
+		return err
 	}
 
-	if methodName == libpf.NullString {
+	// cframe get the method name from the global ID table
+	// iseq-based calls from here share common logic to compute their full label
+	// so we gather their requirements here
+	if cframe {
+		fullLabel = qualifiedMethodName(classPath, methodName, singleton)
+		sourceFile = libpf.Intern("<cfunc>")
+	} else {
 		// The Ruby VM program counter that was extracted from the current call frame is embedded in
 		// the Linenos field.
-		if iseq == nil {
-			iseq, err = r.readIseqBody(iseqBody, pc, frameAddrType, frameFlags)
-			if err != nil {
-				if errors.Is(err, syscall.ESRCH) {
-					processDied(frames)
-					return nil
-				}
-				log.Debugf("iseq body read failed: %v", err)
-			}
+		iseq, err := r.readIseqBody(iseqBody, pc, frameAddrType, frameFlags)
+		if err != nil {
+			log.Errorf("Error reading iseq body: %w", err)
+			return err
 		}
-		methodName = iseq.functionName
-		label = iseq.label
-		baseLabel = iseq.baseLabel
 		sourceFile = iseq.sourceFileName
 		sourceLine = iseq.line
+
+	  fullLabel = profileFrameFullLabel(classPath, iseq.label, iseq.baseLabel, iseq.methodName, singleton, cframe)
+
+	  if fullLabel == libpf.NullString {
+	  	fullLabel = libpf.Intern(fmt.Sprintf("UNKNOWN_FUNCTION %d %08x", frameAddrType, frameFlags))
+	  }
+
 	}
-
-	fullLabel := profileFrameFullLabel(classPath, label, baseLabel, methodName, singleton, cframe)
-
-	if fullLabel == libpf.NullString {
-		fullLabel = libpf.Intern(fmt.Sprintf("UNKNOWN_FUNCTION %d %08x", frameAddrType, frameFlags))
-	}
-	// Ruby doesn't provide the information about the function offset for the
-	// particular line. So we report 0 for this to our backend.
-
-	log.Debugf("flags (%s) (method: %s, label: %s, base: %s), (%d) %04x ", fullLabel.String(), methodName.String(), label.String(), baseLabel.String(), frameAddrType, frameFlags)
+	//log.Debugf("flags (%s) (method: %s, label: %s, base: %s), (%d) %04x ", fullLabel.String(), methodName.String(), label.String(), baseLabel.String(), frameAddrType, frameFlags)
 	frames.Append(&libpf.Frame{
 		Type:         libpf.RubyFrame,
 		FunctionName: fullLabel,
