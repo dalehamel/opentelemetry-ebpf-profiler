@@ -89,13 +89,14 @@ typedef struct vm_env_struct {
 static EBPF_INLINE ErrorCode read_ruby_frame(
   PerCPURecord *record, const RubyProcInfo *rubyinfo, void *stack_ptr, int *next_unwinder)
 {
-  Trace *trace = &record->trace;
+
   // Type of frame we found and are pushing (encoded in upper bits of Frame
   u8 frame_type;
   // Actual frame address of the given type
   u64 frame_addr;
   u64 pc;
 
+  Trace *trace     = &record->trace;
   // should be at offset 0 on the struct, and size of VALUE, so u64 should fit it
   u64 rbasic_flags = 0;
   u64 imemo_mask   = 0;
@@ -140,7 +141,6 @@ read_ep:
   }
   cfunc = (((frame_flags & VM_FRAME_MAGIC_MASK) == VM_FRAME_MAGIC_CFUNC) || pc == 0);
 
-  // Store the frame flags for debugging purposes in case symbolization fails
   // Extract high byte (nibbles 6-7)
   u16 high_byte    = (frame_flags >> 24) & 0xFF;
   u16 low_byte     = (frame_flags >> 4) & 0xFF;
@@ -213,12 +213,7 @@ done_check:
       // unwound rather than eliding it
       record->rubyUnwindState.cfunc_saved_frame = frame_addr;
 
-      // Advance the ruby stack pointer so we will start at the next frame
-      stack_ptr += rubyinfo->size_of_control_frame_struct;
-
       *next_unwinder = PROG_UNWIND_NATIVE;
-      DEBUG_PRINT("ruby: got cfunc, next unwinder is %d", *next_unwinder);
-      // Return early as we don't want to push this frame until we return to ruby unwinder
       return ERR_OK;
     } else {
       // Now we must further verify that it is ISEQ type, but do it out of the loop
@@ -278,6 +273,7 @@ done_check:
 
   return ERR_OK;
 }
+
 // walk_ruby_stack processes a Ruby VM stack, extracts information from the individual frames and
 // pushes this information to user space for symbolization of these frames.
 //
@@ -331,8 +327,6 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
   Trace *trace   = &record->trace;
   *next_unwinder = PROG_UNWIND_STOP;
 
-  // TODO unroll maybe instead
-  int i                  = 0;
   // stack_ptr points to the frame of the Ruby VM call stack that will be unwound next
   void *stack_ptr        = record->rubyUnwindState.stack_ptr;
   // last_stack_frame points to the last frame on the Ruby VM stack we want to process
@@ -377,11 +371,11 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
     }
   }
 
+  ErrorCode error;
   // If we entered native unwinding because we saw a cfunc frame, lets push that
   // frame now so it can take "ownership" of the native code that was unwound
   if (record->rubyUnwindState.cfunc_saved_frame != 0) {
-    ErrorCode error =
-      push_ruby(trace, 0, FRAME_TYPE_CME_CFUNC, record->rubyUnwindState.cfunc_saved_frame, 0);
+    error = push_ruby(trace, 0, FRAME_TYPE_CME_CFUNC, record->rubyUnwindState.cfunc_saved_frame, 0);
     if (error) {
       DEBUG_PRINT("ruby: failed to push cframe");
       return error;
@@ -389,24 +383,30 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
     record->rubyUnwindState.cfunc_saved_frame = 0;
   }
 
-  ErrorCode error;
+  // TODO probably just unroll this loop so upstream will be happy
+  u32 i = 0;
+
 read_frame:
   error = read_ruby_frame(record, rubyinfo, stack_ptr, next_unwinder);
   if (error != ERR_OK)
-    DEBUG_PRINT("ruby: ERROR READING FRAME %d", error);
-    //return error;
+    return error;
 
-  if (last_stack_frame <= stack_ptr)
+  if (last_stack_frame <= stack_ptr) {
+    // We have processed all frames in the Ruby VM and can stop here.
     *next_unwinder = PROG_UNWIND_NATIVE;
-  if (*next_unwinder == PROG_UNWIND_NATIVE)
-    goto save_state;
-  stack_ptr += rubyinfo->size_of_control_frame_struct;
+  } else {
+    // If we aren't at the end, advance the stack pointer to continue from the next frame
+    stack_ptr += rubyinfo->size_of_control_frame_struct;
+  }
 
-  i += 1;
-  if (i < FRAMES_PER_WALK_RUBY_STACK)
-    goto read_frame;
+  if (*next_unwinder != PROG_UNWIND_NATIVE) {
+    // jumping read_cfp label implements a much cheaper loop than using UNROLL macro
+    i += 1;
+    if (i < FRAMES_PER_WALK_RUBY_STACK)
+      goto read_frame;
 
-  *next_unwinder = PROG_UNWIND_RUBY;
+    *next_unwinder = PROG_UNWIND_RUBY;
+  }
 
 save_state:
   // Store the current progress in the Ruby unwind state so we can continue walking the stack
