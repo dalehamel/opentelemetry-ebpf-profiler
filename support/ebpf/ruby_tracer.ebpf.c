@@ -19,7 +19,7 @@ struct ruby_procs_t {
 // we start running out of instructions in the walk_ruby_stack program, one
 // option is to adjust this number downwards.
 // NOTE the maximum size stack is this times 33
-#define FRAMES_PER_WALK_RUBY_STACK 48
+#define FRAMES_PER_WALK_RUBY_STACK 32
 // When resolving a CME, we need to traverse environment pointers until we
 // find IMEMO_MENT. Since we can't do a while loop, we have to bound this
 // the max encountered in experimentation on a production rails app is 6, so 10

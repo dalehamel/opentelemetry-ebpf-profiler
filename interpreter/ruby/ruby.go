@@ -1087,7 +1087,6 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		// the Linenos field.
 		iseq, err := r.readIseqBody(iseqBody, pc, frameAddrType, frameFlags)
 		if err != nil {
-			log.Errorf("Error reading iseq body: %w", err)
 			return err
 		}
 		sourceFile = iseq.sourceFileName
