@@ -151,13 +151,13 @@ read_ep:
   u16 packed_flags = (high_byte << 8) | low_byte;
 
 check_me:
-  DEBUG_PRINT("ruby: checking %llx", me_or_cref);
+  // DEBUG_PRINT("ruby: checking %llx", me_or_cref);
   if (me_or_cref == 0)
     goto next_ep;
 
   if (bpf_probe_read_user(&rbasic_flags, sizeof(rbasic_flags), (void *)(me_or_cref))) {
-    DEBUG_PRINT("ruby: failed to read flags to check method entry %llx", (u64)me_or_cref);
-    // TODO increment metric
+    // DEBUG_PRINT("ruby: failed to read flags to check method entry %llx", (u64)me_or_cref);
+    //  TODO increment metric
     return ERR_RUBY_READ_RBASIC_FLAGS;
   }
 
@@ -167,15 +167,15 @@ check_me:
   if ((u64)vm_env.flags & VM_ENV_FLAG_LOCAL) {
     if (imemo_mask == IMEMO_SVAR) {
       if (bpf_probe_read_user(&svar_cref, sizeof(svar_cref), (void *)(me_or_cref + 8))) {
-        DEBUG_PRINT("ruby: failed to dereference svar %llx", (u64)me_or_cref);
-        // TODO increment metric
+        // DEBUG_PRINT("ruby: failed to dereference svar %llx", (u64)me_or_cref);
+        //  TODO increment metric
         return ERR_RUBY_READ_SVAR;
       }
       me_or_cref = svar_cref;
 
       if (bpf_probe_read_user(&rbasic_flags, sizeof(rbasic_flags), (void *)(me_or_cref))) {
-        DEBUG_PRINT("ruby: failed to read flags to check method entry %llx", (u64)me_or_cref);
-        // TODO increment metric
+        // DEBUG_PRINT("ruby: failed to read flags to check method entry %llx", (u64)me_or_cref);
+        //  TODO increment metric
         return ERR_RUBY_READ_RBASIC_FLAGS;
       }
       imemo_mask = (rbasic_flags >> RUBY_FL_USHIFT) & IMEMO_MASK;
@@ -200,7 +200,7 @@ next_ep:
 done_check:
 
   if (imemo_mask == IMEMO_MENT) {
-    DEBUG_PRINT("ruby: imemo type is method entry");
+    // DEBUG_PRINT("ruby: imemo type is method entry");
     frame_addr = me_or_cref;
 
     if (cfunc) {
@@ -229,14 +229,14 @@ done_check:
 
       if (bpf_probe_read_user(
             &method_def, sizeof(method_def), (void *)(frame_addr + rubyinfo->cme_method_def))) {
-        DEBUG_PRINT("ruby: failed to get method def");
-        // increment_metric(metricID_UnwindRubyErrReadIseqBody);
+        // DEBUG_PRINT("ruby: failed to get method def");
+        //  increment_metric(metricID_UnwindRubyErrReadIseqBody);
         return ERR_RUBY_READ_METHOD_DEF;
       }
 
       if (bpf_probe_read_user(&method_type, sizeof(method_type), (void *)(method_def))) {
-        DEBUG_PRINT("ruby: failed to get method def type body");
-        // increment_metric(metricID_UnwindRubyErrReadIseqBody);
+        // DEBUG_PRINT("ruby: failed to get method def type body");
+        //  increment_metric(metricID_UnwindRubyErrReadIseqBody);
         return ERR_RUBY_READ_METHOD_TYPE;
       }
 
@@ -250,14 +250,14 @@ done_check:
   // Fallback to just reading the iseq if we couldn't detect a supported CME type
   if (frame_type == FRAME_TYPE_NONE) {
     if (control_frame.iseq == NULL) {
-      DEBUG_PRINT("ruby: NULL iseq entry");
+      // DEBUG_PRINT("ruby: NULL iseq entry");
       return ERR_RUBY_INVALID_ISEQ;
     }
 
     if (control_frame.iseq != NULL) {
       if (bpf_probe_read_user(
             &frame_addr, sizeof(frame_addr), (void *)(control_frame.iseq + rubyinfo->body))) {
-        DEBUG_PRINT("ruby: failed to get iseq body");
+        // DEBUG_PRINT("ruby: failed to get iseq body");
         increment_metric(metricID_UnwindRubyErrReadIseqBody);
         return ERR_RUBY_READ_ISEQ_BODY;
       }
