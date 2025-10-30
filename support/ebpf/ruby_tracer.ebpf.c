@@ -203,14 +203,23 @@ done_check:
     frame_addr = me_or_cref;
 
     if (cfunc) {
-      frame_type                                = FRAME_TYPE_CME_CFUNC;
-      // We save this cfp on in the "Record" entry, and when we start the unwinder
-      // again we'll push it so that the order is correct and the cfunc "owns" any native code we
-      // unwound rather than eliding it
-      record->rubyUnwindState.cfunc_saved_frame = frame_addr;
+      if (rubyinfo->version < 0x20600) {
+        // With Ruby version 2.6 the scope of our entry symbol ruby_current_execution_context_ptr
+        // got extended. We need this extension to jump back unwinding Ruby VM frames if we
+        // continue at this point with unwinding native frames.
+        // As this is not available for Ruby versions < 2.6 we just push the cfunc frame and
+        // continue unwinding Ruby VM frames. Due to this issue, the ordering of Ruby and native
+        // frames will almost certainly be incorrect for Ruby versions < 2.6.
+        frame_type = FRAME_TYPE_CME_CFUNC;
+      } else {
+        // We save this cfp on in the "Record" entry, and when we start the unwinder
+        // again we'll push it so that the order is correct and the cfunc "owns" any native code we
+        // unwound rather than eliding it
+        record->rubyUnwindState.cfunc_saved_frame = frame_addr;
 
-      *next_unwinder = PROG_UNWIND_NATIVE;
-      return ERR_OK;
+        *next_unwinder = PROG_UNWIND_NATIVE;
+        return ERR_OK;
+      }
     } else {
       // Now we must further verify that it is ISEQ type, but do it out of the loop
       // https://github.com/ruby/ruby/blob/v3_4_5/vm_backtrace.c#L1736
@@ -226,7 +235,7 @@ done_check:
 
       if (bpf_probe_read_user(&method_type, sizeof(method_type), (void *)(method_def))) {
         DEBUG_PRINT("ruby: failed to get method def type body");
-        //increment_metric(metricID_UnwindRubyErrReadIseqBody);
+        // increment_metric(metricID_UnwindRubyErrReadIseqBody);
         return ERR_RUBY_READ_METHOD_TYPE;
       }
 
