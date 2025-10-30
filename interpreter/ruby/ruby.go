@@ -741,7 +741,7 @@ func (r *rubyInstance) readClassName(classAddr libpf.Address) (libpf.String, boo
 	classFlags := r.rm.Ptr(classAddr)
 	classMask := classFlags & rubyTMask
 
-	log.Warnf("flags: %x, singleton %x", classFlags, classFlags&r.r.rubyFlSingleton)
+	// TODO clean this up more
 	classpathPtr = r.rm.Ptr(classAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath))
 	if classMask == rubyTIClass {
 		//https://github.com/ruby/ruby/blob/b627532/vm_backtrace.c#L1931-L1933
@@ -762,7 +762,6 @@ func (r *rubyInstance) readClassName(classAddr libpf.Address) (libpf.String, boo
 		// https://github.com/ruby/ruby/blob/b627532/vm_backtrace.c#L1934-L1937
 		// https://github.com/ruby/ruby/blob/b627532/internal/class.h#L528
 
-		log.Warnf("Got singleton class")
 		singleton = true
 		singletonObject := r.rm.Ptr(classAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.as_singleton_class_attached_object))
 		classpathPtr = r.rm.Ptr(singletonObject + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath))
@@ -775,6 +774,8 @@ func (r *rubyInstance) readClassName(classAddr libpf.Address) (libpf.String, boo
 		// #define RCLASS_ATTACHED_OBJECT(c) (RCLASS_EXT_PRIME(c)->as.singleton_class.attached_object)
 	}
 
+	// TODO Document we are only doing the "happy path" where there is a classpath, and not
+	// handling the anonymous case or weird module cases yet.
 	if classpathPtr != 0 {
 		classPath, err = r.getStringCached(classpathPtr, r.readRubyString)
 		if err != nil {
@@ -1014,6 +1015,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	var sourceLine libpf.SourceLineno
 	var singleton bool
 	var cframe bool
+	var cme bool
 
 	vms := &r.r.vmStructs
 	frameAddr := libpf.Address(frame.File & support.RubyAddrMask48Bit)
@@ -1024,57 +1026,49 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 
 	switch frameAddrType {
 	case support.RubyFrameTypeCmeCfunc:
+		cme = true
 		cframe = true
 		methodDefinition, err := r.PtrCheck(frameAddr + libpf.Address(vms.rb_method_entry_struct.def))
 		if err != nil {
-			log.Errorf("error reading cfunc method def %v", err)
 			return err
 		}
 
-		classDefinition := r.rm.Ptr(frameAddr + libpf.Address(vms.rb_method_entry_struct.defined_class))
-		// TODO version gate this
-		classPath, singleton, err = r.readClassName(classDefinition)
-		if err != nil {
-			log.Errorf("Failed to read class name from owner for cfunc: %v", err)
-		} else {
-			log.Warnf("Got %s for cfunc owner %x", classPath, classDefinition)
-		}
 		originalId := r.rm.Uint64(methodDefinition + libpf.Address(vms.rb_method_definition_struct.original_id))
 
 		methodName, err = r.id2str(originalId)
-		log.Warnf("Got cfunc name %s", methodName)
 	case support.RubyFrameTypeCmeIseq:
+		cme = true
 
 		methodDefinition, err := r.PtrCheck(frameAddr + libpf.Address(vms.rb_method_entry_struct.def))
 		if err != nil {
-			log.Errorf("error reading iseq method def %v", err)
 			return fmt.Errorf("Unable to read method definition, CME (%08x) %v", frameAddr, err)
-		}
-
-		classDefinition := r.rm.Ptr(frameAddr + libpf.Address(vms.rb_method_entry_struct.defined_class))
-
-		// TODO version gate this
-		classPath, singleton, err = r.readClassName(classDefinition)
-		if err != nil {
-			log.Errorf("Failed to read class name for iseq: %v", err)
 		}
 
 		methodBody := r.rm.Ptr(methodDefinition + libpf.Address(vms.rb_method_definition_struct.body))
 		if methodBody == 0 {
-			log.Errorf("error reading method body %v", err)
-			return fmt.Errorf("unable to read method body, classpath: %s", classPath.String())
+			return fmt.Errorf("unable to read method body for CME")
 		}
 
 		iseqBody = r.rm.Ptr(methodBody + libpf.Address(vms.rb_method_iseq_struct.iseqptr+vms.iseq_struct.body))
 
 		if iseqBody == 0 {
-			err = fmt.Errorf("unable to read iseq body")
+			return fmt.Errorf("unable to read iseq body for CME")
 		}
 
 	case support.RubyFrameTypeIseq:
 		iseqBody = libpf.Address(frameAddr)
 	default:
-		err = fmt.Errorf("Unable to get CME or ISEQ from frame address")
+		return fmt.Errorf("Unable to get CME or ISEQ from frame address")
+	}
+
+	if cme && r.r.hasClassPath {
+		classDefinition := r.rm.Ptr(frameAddr + libpf.Address(vms.rb_method_entry_struct.defined_class))
+
+		// TODO version gate this
+		classPath, singleton, err = r.readClassName(classDefinition)
+		if err != nil {
+			log.Errorf("Failed to read class name for cme: %v", err)
+		}
 	}
 
 	if err != nil {
@@ -1104,9 +1098,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		if fullLabel == libpf.NullString {
 			fullLabel = libpf.Intern(fmt.Sprintf("UNKNOWN_FUNCTION %d %08x", frameAddrType, frameFlags))
 		}
-
 	}
-	//log.Debugf("flags (%s) (method: %s, label: %s, base: %s), (%d) %04x ", fullLabel.String(), methodName.String(), label.String(), baseLabel.String(), frameAddrType, frameFlags)
 	frames.Append(&libpf.Frame{
 		Type:         libpf.RubyFrame,
 		FunctionName: fullLabel,
@@ -1359,12 +1351,22 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 
 	vms := &rid.vmStructs
 	switch {
-	case version > rubyVersion(3, 3, 0):
+	case version < rubyVersion(3, 3, 0):
+		rid.hasClassPath = false
+	case version < rubyVersion(3, 4, 0):
 		rid.hasClassPath = true
 		rid.rubyFlSingleton = libpf.Address(RUBY_FL_USER0)
-	case version > rubyVersion(3, 4, 0):
+
+		vms.rclass_and_rb_classext_t.classext = 32
+		vms.rb_classext_struct.as_singleton_class_attached_object = 96
+		vms.rb_classext_struct.classpath = 120
+	default:
 		rid.hasClassPath = true
 		rid.rubyFlSingleton = libpf.Address(RUBY_FL_USER1)
+
+		vms.rclass_and_rb_classext_t.classext = 32
+		vms.rb_classext_struct.as_singleton_class_attached_object = 96
+		vms.rb_classext_struct.classpath = 120
 	}
 
 	// Ruby does not provide introspection data, hard code the struct field offsets. Some
@@ -1399,6 +1401,7 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 	vms.iseq_constant_body.size = 4
 	vms.iseq_constant_body.encoded = 8
 	vms.iseq_constant_body.location = 64
+	vms.iseq_constant_body.local_iseq = 168
 	switch {
 	case version < rubyVersion(2, 6, 0):
 		vms.iseq_constant_body.insn_info_body = 112
@@ -1419,13 +1422,11 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 		vms.iseq_constant_body.insn_info_body = 112
 		vms.iseq_constant_body.insn_info_size = 128
 		vms.iseq_constant_body.succ_index_table = 136
-		vms.iseq_constant_body.local_iseq = 168
 		vms.iseq_constant_body.size_of_iseq_constant_body = 352
 	default: // 3.3.x and 3.5.x have the same values
 		vms.iseq_constant_body.insn_info_body = 112
 		vms.iseq_constant_body.insn_info_size = 128
 		vms.iseq_constant_body.succ_index_table = 136
-		vms.iseq_constant_body.local_iseq = 168
 		vms.iseq_constant_body.size_of_iseq_constant_body = 344
 	}
 	vms.iseq_location_struct.pathobj = 0
@@ -1473,6 +1474,16 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 
 	vms.size_of_value = 8
 
+	vms.rb_method_entry_struct.flags = 0
+	vms.rb_method_entry_struct.defined_class = 8
+	vms.rb_method_entry_struct.def = 16
+	vms.rb_method_entry_struct.owner = 32
+
+	vms.rb_method_definition_struct.method_type = 0
+	vms.rb_method_definition_struct.body = 8
+	vms.rb_method_definition_struct.original_id = 32
+	vms.rb_method_iseq_struct.iseqptr = 0
+
 	if version >= rubyVersion(3, 0, 0) {
 		if version >= rubyVersion(3, 3, 0) {
 			if runtime.GOARCH == "amd64" {
@@ -1480,20 +1491,6 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 			} else {
 				vms.rb_ractor_struct.running_ec = 0x190
 			}
-
-			vms.rb_method_entry_struct.flags = 0
-			vms.rb_method_entry_struct.defined_class = 8
-			vms.rb_method_entry_struct.def = 16
-			vms.rb_method_entry_struct.owner = 32
-
-			vms.rclass_and_rb_classext_t.classext = 32
-			vms.rb_classext_struct.as_singleton_class_attached_object = 96
-			vms.rb_classext_struct.classpath = 120
-
-			vms.rb_method_definition_struct.method_type = 0
-			vms.rb_method_definition_struct.body = 8
-			vms.rb_method_definition_struct.original_id = 32
-			vms.rb_method_iseq_struct.iseqptr = 0
 
 		} else {
 			if runtime.GOARCH == "amd64" {

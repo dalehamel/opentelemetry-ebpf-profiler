@@ -116,8 +116,10 @@ read_cfp:
   ep_check    = 0;
   frame_flags = 0;
 
-  // TODO add guard checks here
-  bpf_probe_read_user(&control_frame, sizeof(rb_control_frame_t), (void *)(stack_ptr));
+  if (bpf_probe_read_user(&control_frame, sizeof(rb_control_frame_t), (void *)(stack_ptr))) {
+    // TODO increment metric
+    return ERR_RUBY_READ_STACK_PTR;
+  }
   current_ep = (void *)control_frame.ep;
   pc         = (u64)control_frame.pc;
 
@@ -154,9 +156,8 @@ check_me:
 
   if (bpf_probe_read_user(&rbasic_flags, sizeof(rbasic_flags), (void *)(me_or_cref))) {
     DEBUG_PRINT("ruby: failed to read flags to check method entry %llx", (u64)me_or_cref);
-    // TODO have a named error for this
-    // return -1;
-    return ERR_PYTHON_READ_TSD_BASE;
+    // TODO increment metric
+    return ERR_RUBY_READ_RBASIC_FLAGS;
   }
 
   // https://github.com/ruby/ruby/blob/3361aa5c7df35b1d1daea578fefec3addf29c9a6/internal/imemo.h#L165-L169
@@ -166,19 +167,15 @@ check_me:
     if (imemo_mask == IMEMO_SVAR) {
       if (bpf_probe_read_user(&svar_cref, sizeof(svar_cref), (void *)(me_or_cref + 8))) {
         DEBUG_PRINT("ruby: failed to dereference svar %llx", (u64)me_or_cref);
-        // TODO have a named error for this
-        // return -1;
-        // goto done_check;
-        return ERR_RUBY_READ_ISEQ_ENCODED;
+        // TODO increment metric
+        return ERR_RUBY_READ_SVAR;
       }
       me_or_cref = svar_cref;
 
       if (bpf_probe_read_user(&rbasic_flags, sizeof(rbasic_flags), (void *)(me_or_cref))) {
         DEBUG_PRINT("ruby: failed to read flags to check method entry %llx", (u64)me_or_cref);
-        // TODO have a named error for this
-        // goto done_check;
-        // return -1;
-        return ERR_RUBY_READ_ISEQ_SIZE;
+        // TODO increment metric
+        return ERR_RUBY_READ_RBASIC_FLAGS;
       }
       imemo_mask = (rbasic_flags >> RUBY_FL_USHIFT) & IMEMO_MASK;
     }
@@ -197,8 +194,7 @@ next_ep:
   // TODO have a named error for this
   // TODO fallback to checking in userspace from EP pointer
   if (ep_check >= MAX_EP_CHECKS)
-    return ERR_RUBY_READ_ISEQ_BODY;
-  //  //return -1;
+    return ERR_RUBY_READ_CME_MAX_EP;
 
 done_check:
 
@@ -225,14 +221,13 @@ done_check:
             &method_def, sizeof(method_def), (void *)(frame_addr + rubyinfo->cme_method_def))) {
         DEBUG_PRINT("ruby: failed to get method def");
         // increment_metric(metricID_UnwindRubyErrReadIseqBody);
-        // return ERR_RUBY_READ_ISEQ_BODY;
-        return -1;
+        return ERR_RUBY_READ_METHOD_DEF;
       }
 
       if (bpf_probe_read_user(&method_type, sizeof(method_type), (void *)(method_def))) {
         DEBUG_PRINT("ruby: failed to get method def type body");
-        increment_metric(metricID_UnwindRubyErrReadIseqBody);
-        return -1;
+        //increment_metric(metricID_UnwindRubyErrReadIseqBody);
+        return ERR_RUBY_READ_METHOD_TYPE;
       }
 
       method_type &= 0xf;
@@ -246,8 +241,7 @@ done_check:
   if (frame_type == FRAME_TYPE_NONE) {
     if (control_frame.iseq == NULL) {
       DEBUG_PRINT("ruby: NULL iseq entry");
-      // return -1;
-      return ERR_PYTHON_BAD_AUTO_TLS_KEY_ADDR;
+      return ERR_RUBY_INVALID_ISEQ;
     }
 
     if (control_frame.iseq != NULL) {
@@ -450,7 +444,7 @@ static EBPF_INLINE int unwind_ruby(struct pt_regs *ctx)
     u64 tsd_base;
     if (tsd_get_base((void **)&tsd_base) != 0) {
       DEBUG_PRINT("ruby: failed to get TSD base for TLS symbol lookup");
-      return 0;
+      goto exit;
     }
 
     u64 tls_current_ec_addr = tsd_base + rubyinfo->current_ec_tpbase_tls_offset;
@@ -491,12 +485,6 @@ static EBPF_INLINE int unwind_ruby(struct pt_regs *ctx)
 
   error = walk_ruby_stack(record, rubyinfo, current_ctx_addr, &unwinder);
 exit:
-
-  // FIXME - we should only return positive, properly named errors
-  // This is a hack to just not set -1 as the error code, which underflows
-  if (error < 0 || error == 4294967295) {
-    error = ERR_RUBY_READ_STACK_PTR;
-  }
   record->state.unwind_error = error;
   tail_call(ctx, unwinder);
   return -1;
