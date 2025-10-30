@@ -157,6 +157,9 @@ type rubyData struct {
 	// Is it possible to read the classpath
 	hasClassPath bool
 
+	// Is it possible to read the global symbol table (to symbolize cfuncs)
+	hasGlobalSymbols bool
+
 	// vmStructs reflects the Ruby internal names and offsets of named fields.
 	vmStructs struct {
 		// rb_execution_context_struct
@@ -1038,7 +1041,14 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 
 		originalId := r.rm.Uint64(methodDefinition + libpf.Address(vms.rb_method_definition_struct.original_id))
 
-		methodName, err = r.id2str(originalId)
+		if r.r.hasGlobalSymbols {
+			methodName, err = r.id2str(originalId)
+			if err != nil {
+				return err
+			}
+		} else {
+			methodName = libpf.Intern("UNKNOWN CFUNC")
+		}
 	case support.RubyFrameTypeCmeIseq:
 		cme = true
 
@@ -1342,7 +1352,7 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 		log.Warnf("failed to locate TLS descriptor: %v", err)
 	}
 
-	log.Debugf("Discovered EC tls tpbase offset %x, fallback ctx %x, interp ranges: %v", currentEcTpBaseTlsOffset, currentCtxPtr, interpRanges)
+	log.Debugf("Discovered EC tls tpbase offset %x, fallback ctx %x, interp ranges: %v, global symbols: %x", currentEcTpBaseTlsOffset, currentCtxPtr, interpRanges, globalSymbolsAddr)
 
 	rid := &rubyData{
 		version:                  version,
@@ -1350,6 +1360,8 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 		currentCtxPtr:            libpf.Address(currentCtxPtr),
 		globalSymbolsAddr:        libpf.Address(globalSymbolsAddr),
 	}
+
+	rid.hasGlobalSymbols = globalSymbolsAddr != 0
 
 	vms := &rid.vmStructs
 	switch {
