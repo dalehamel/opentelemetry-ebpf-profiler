@@ -25,7 +25,8 @@ struct ruby_procs_t {
 // the max encountered in experimentation on a production rails app is 6, so 10
 // should give some wiggle room. This increases insn for the kernel verifier
 // and code in the ep check "loop" is M*N for instruction checks
-#define MAX_EP_CHECKS              10
+// If we get ERR_RUBY_READ_CME_MAX_EP regularly, we may need to raise it.
+#define MAX_EP_CHECKS              6
 
 #define VM_METHOD_TYPE_ISEQ 0
 #define VM_ENV_FLAG_LOCAL   0x2
