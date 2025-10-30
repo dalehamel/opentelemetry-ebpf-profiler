@@ -92,6 +92,8 @@ const (
 const (
 	// https://github.com/ruby/ruby/blob/1d1529629ce1550fad19c2d9410c4bf4995230d2/include/ruby/internal/fl_type.h#L158
 	RUBY_FL_USHIFT = 12
+
+	RUBY_FL_USER0 = 1 << (RUBY_FL_USHIFT + 0)
 	// https://github.com/ruby/ruby/blob/1d1529629ce1550fad19c2d9410c4bf4995230d2/include/ruby/internal/fl_type.h#L323-L324
 	RUBY_FL_USER1 = 1 << (RUBY_FL_USHIFT + 1)
 
@@ -113,9 +115,6 @@ const (
 
 	// https://github.com/ruby/ruby/blob/8836f26efa7a6deb0ef8b3f253d8d53d04d43152/include/ruby/internal/core/rarray.h#L122-L125
 	RARRAY_EMBED_LEN_SHIFT = RUBY_FL_USHIFT + 3
-
-	// https://github.com/ruby/ruby/blob/1d1529629ce1550fad19c2d9410c4bf4995230d2/include/ruby/internal/fl_type.h#L394
-	RUBY_FL_SINGLETON = RUBY_FL_USER1
 )
 
 var (
@@ -124,8 +123,8 @@ var (
 	// regex to extract a version from a string
 	rubyVersionRegex = regexp.MustCompile(`^(\d)\.(\d)\.(\d)$`)
 
-	rubyProcessDied   = libpf.Intern("PROCESS_DIED")
-	rubyDeadFile      = libpf.Intern("<dead>")
+	rubyProcessDied = libpf.Intern("PROCESS_DIED")
+	rubyDeadFile    = libpf.Intern("<dead>")
 
 	// compiler check to make sure the needed interfaces are satisfied
 	_ interpreter.Data     = &rubyData{}
@@ -146,6 +145,12 @@ type rubyData struct {
 	// version of the currently used Ruby interpreter.
 	// major*0x10000 + minor*0x100 + release (e.g. 3.0.1 -> 0x30001)
 	version uint32
+
+	// Flag for detecting singletons, can vary by version
+	rubyFlSingleton libpf.Address
+
+	// Is it possible to read the classpath
+	hasClassPath bool
 
 	// vmStructs reflects the Ruby internal names and offsets of named fields.
 	vmStructs struct {
@@ -300,7 +305,7 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 		rm:                rm,
 		procInfo:          cdata,
 		globalSymbolsAddr: r.globalSymbolsAddr + bias,
-		addrToString:         addrToString,
+		addrToString:      addrToString,
 		memPool: sync.Pool{
 			New: func() any {
 				buf := make([]byte, 512)
@@ -342,7 +347,7 @@ type rubyInstance struct {
 	r  *rubyData
 	rm remotememory.RemoteMemory
 
-	procInfo          support.RubyProcInfo
+	procInfo support.RubyProcInfo
 
 	// globalSymbolsAddr is the offset of the global symbol table, for looking up ruby symbolic ids
 	globalSymbolsAddr libpf.Address
@@ -409,7 +414,7 @@ func (r *rubyInstance) readPathObjRealPath(addr libpf.Address) (string, error) {
 		}
 
 		// Read contiguous pointer values into a buffer to be more efficient
-		dataBytes := make([]byte, 2 * vms.size_of_value)
+		dataBytes := make([]byte, 2*vms.size_of_value)
 		if err := r.rm.Read(arrData, dataBytes); err != nil {
 			return "", fmt.Errorf("failed to read array data bytes: %v", err)
 		}
@@ -736,26 +741,9 @@ func (r *rubyInstance) readClassName(classAddr libpf.Address) (libpf.String, boo
 	classFlags := r.rm.Ptr(classAddr)
 	classMask := classFlags & rubyTMask
 
-	switch classMask {
-	case rubyTClass, rubyTModule:
-		classpathPtr = r.rm.Ptr(classAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath))
-
-		// Should also check if it is a singleton
-		// https://github.com/ruby/ruby/blob/b627532/vm_backtrace.c#L1934-L1937
-		// https://github.com/ruby/ruby/blob/b627532/internal/class.h#L528
-
-		if classFlags&RUBY_FL_SINGLETON != 0 {
-			log.Debugf("Got singleton class")
-			singleton = true
-			singletonObject := r.rm.Ptr(classAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.as_singleton_class_attached_object))
-			classpathPtr = r.rm.Ptr(singletonObject + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath))
-		}
-		// If it is neither a class nor a module, we should handle what i guess is an anonymous class?
-		// https://github.com/ruby/ruby/blob/b627532/vm_backtrace.c#L1936-L1937 (see rb_class2name)
-
-		// #define RCLASS_EXT_PRIME(c) (&((struct RClass_and_rb_classext_t*)(c))->classext)
-		// #define RCLASS_ATTACHED_OBJECT(c) (RCLASS_EXT_PRIME(c)->as.singleton_class.attached_object)
-	case rubyTIClass:
+	log.Warnf("flags: %x, singleton %x", classFlags, classFlags&r.r.rubyFlSingleton)
+	classpathPtr = r.rm.Ptr(classAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath))
+	if classMask == rubyTIClass {
 		//https://github.com/ruby/ruby/blob/b627532/vm_backtrace.c#L1931-L1933
 
 		// Get the 'klass'
@@ -769,8 +757,22 @@ func (r *rubyInstance) readClassName(classAddr libpf.Address) (libpf.String, boo
 			log.Debugf("Using klass for iclass type")
 			classpathPtr = r.rm.Ptr(klassAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath))
 		}
-	default:
-		return libpf.NullString, singleton, fmt.Errorf("object at 0x%08X is not a handled class (mask: %08X)", classAddr, classMask)
+	} else if classFlags&r.r.rubyFlSingleton != 0 {
+		// Should also check if it is a singleton
+		// https://github.com/ruby/ruby/blob/b627532/vm_backtrace.c#L1934-L1937
+		// https://github.com/ruby/ruby/blob/b627532/internal/class.h#L528
+
+		log.Warnf("Got singleton class")
+		singleton = true
+		singletonObject := r.rm.Ptr(classAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.as_singleton_class_attached_object))
+		classpathPtr = r.rm.Ptr(singletonObject + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath))
+
+		// TODO handle anonymous classes
+		// If it is neither a class nor a module, we should handle what i guess is an anonymous class?
+		// https://github.com/ruby/ruby/blob/b627532/vm_backtrace.c#L1936-L1937 (see rb_class2name)
+
+		// #define RCLASS_EXT_PRIME(c) (&((struct RClass_and_rb_classext_t*)(c))->classext)
+		// #define RCLASS_ATTACHED_OBJECT(c) (RCLASS_EXT_PRIME(c)->as.singleton_class.attached_object)
 	}
 
 	if classpathPtr != 0 {
@@ -1022,32 +1024,32 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 
 	switch frameAddrType {
 	case support.RubyFrameTypeCmeCfunc:
-	  methodDefinition, err := r.PtrCheck(frameAddr + libpf.Address(vms.rb_method_entry_struct.def))
-	  if err != nil {
-			log.Errorf("%w", err)
-			return err
-	  }
-
 		cframe = true
-		classDefinition := r.rm.Ptr(frameAddr + libpf.Address(vms.rb_method_entry_struct.owner))
+		methodDefinition, err := r.PtrCheck(frameAddr + libpf.Address(vms.rb_method_entry_struct.def))
+		if err != nil {
+			log.Errorf("error reading cfunc method def %v", err)
+			return err
+		}
+
+		classDefinition := r.rm.Ptr(frameAddr + libpf.Address(vms.rb_method_entry_struct.defined_class))
 		// TODO version gate this
 		classPath, singleton, err = r.readClassName(classDefinition)
 		if err != nil {
 			log.Errorf("Failed to read class name from owner for cfunc: %v", err)
 		} else {
-			log.Debugf("Got %s for cfunc owner", classPath)
+			log.Warnf("Got %s for cfunc owner %x", classPath, classDefinition)
 		}
 		originalId := r.rm.Uint64(methodDefinition + libpf.Address(vms.rb_method_definition_struct.original_id))
 
 		methodName, err = r.id2str(originalId)
-		log.Debugf("Got cfunc name %s", methodName)
+		log.Warnf("Got cfunc name %s", methodName)
 	case support.RubyFrameTypeCmeIseq:
 
-	  methodDefinition, err := r.PtrCheck(frameAddr + libpf.Address(vms.rb_method_entry_struct.def))
-	  if err != nil {
-			log.Errorf("%w", err)
-	  	return fmt.Errorf("Unable to read method definition, CME (%08x) %v", frameAddr, err)
-	  }
+		methodDefinition, err := r.PtrCheck(frameAddr + libpf.Address(vms.rb_method_entry_struct.def))
+		if err != nil {
+			log.Errorf("error reading iseq method def %v", err)
+			return fmt.Errorf("Unable to read method definition, CME (%08x) %v", frameAddr, err)
+		}
 
 		classDefinition := r.rm.Ptr(frameAddr + libpf.Address(vms.rb_method_entry_struct.defined_class))
 
@@ -1059,7 +1061,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 
 		methodBody := r.rm.Ptr(methodDefinition + libpf.Address(vms.rb_method_definition_struct.body))
 		if methodBody == 0 {
-			log.Errorf("%w", err)
+			log.Errorf("error reading method body %v", err)
 			return fmt.Errorf("unable to read method body, classpath: %s", classPath.String())
 		}
 
@@ -1097,11 +1099,11 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		sourceFile = iseq.sourceFileName
 		sourceLine = iseq.line
 
-	  fullLabel = profileFrameFullLabel(classPath, iseq.label, iseq.baseLabel, iseq.methodName, singleton, cframe)
+		fullLabel = profileFrameFullLabel(classPath, iseq.label, iseq.baseLabel, iseq.methodName, singleton, cframe)
 
-	  if fullLabel == libpf.NullString {
-	  	fullLabel = libpf.Intern(fmt.Sprintf("UNKNOWN_FUNCTION %d %08x", frameAddrType, frameFlags))
-	  }
+		if fullLabel == libpf.NullString {
+			fullLabel = libpf.Intern(fmt.Sprintf("UNKNOWN_FUNCTION %d %08x", frameAddrType, frameFlags))
+		}
 
 	}
 	//log.Debugf("flags (%s) (method: %s, label: %s, base: %s), (%d) %04x ", fullLabel.String(), methodName.String(), label.String(), baseLabel.String(), frameAddrType, frameFlags)
@@ -1349,13 +1351,21 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 	log.Debugf("Discovered EC tls tpbase offset %x, fallback ctx %x, interp ranges: %v", currentEcTpBaseTlsOffset, currentCtxPtr, interpRanges)
 
 	rid := &rubyData{
-		version:            version,
-		currentEcTpBaseTlsOffset:     libpf.Address(currentEcTpBaseTlsOffset),
-		currentCtxPtr:      libpf.Address(currentCtxPtr),
-		globalSymbolsAddr:  libpf.Address(globalSymbolsAddr),
+		version:                  version,
+		currentEcTpBaseTlsOffset: libpf.Address(currentEcTpBaseTlsOffset),
+		currentCtxPtr:            libpf.Address(currentCtxPtr),
+		globalSymbolsAddr:        libpf.Address(globalSymbolsAddr),
 	}
 
 	vms := &rid.vmStructs
+	switch {
+	case version > rubyVersion(3, 3, 0):
+		rid.hasClassPath = true
+		rid.rubyFlSingleton = libpf.Address(RUBY_FL_USER0)
+	case version > rubyVersion(3, 4, 0):
+		rid.hasClassPath = true
+		rid.rubyFlSingleton = libpf.Address(RUBY_FL_USER1)
+	}
 
 	// Ruby does not provide introspection data, hard code the struct field offsets. Some
 	// values can be fairly easily calculated from the struct definitions, but some are
