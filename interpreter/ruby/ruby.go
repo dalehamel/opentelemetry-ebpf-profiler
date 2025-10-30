@@ -146,6 +146,11 @@ type rubyData struct {
 	// major*0x10000 + minor*0x100 + release (e.g. 3.0.1 -> 0x30001)
 	version uint32
 
+	// this is compiled into ruby (id.h.tmpl) as a template and needed for symbolizing
+	// c function frames
+	// get this with `print (int)tLAST_OP_ID` in gdb
+	lastOpId uint64
+
 	// Flag for detecting singletons, can vary by version
 	rubyFlSingleton libpf.Address
 
@@ -797,8 +802,6 @@ func (r *rubyInstance) id2str(originalId uint64) (libpf.String, error) {
 	// RUBY_ID_SCOPE_SHIFT = 4
 	// https://github.com/ruby/ruby/blob/797a4115bbb249c4f5f11e1b4bacba7781c68cee/template/id.h.tmpl#L30
 	RUBY_ID_SCOPE_SHIFT := 4
-	// FIXME this is compiled into ruby (id.h.tmpl) as a template :lolcry: see if we can read it from gdb using gdbinit or something, but we will need a big table to find it
-	lastOpId := uint64(170) // this is the value for 3.4.4+ according to rbspy
 
 	// TODO handle differences post 3.4.6:
 	//prior to 3.4.6:
@@ -819,7 +822,7 @@ func (r *rubyInstance) id2str(originalId uint64) (libpf.String, error) {
 	IDS_OFFSET := 16 // rb_id_serial_t probably gets padded to be word-aligned
 
 	serial := originalId
-	if originalId > lastOpId {
+	if originalId > r.r.lastOpId {
 		serial = originalId >> RUBY_ID_SCOPE_SHIFT
 	}
 
@@ -1366,6 +1369,21 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 		vms.rclass_and_rb_classext_t.classext = 32
 		vms.rb_classext_struct.as_singleton_class_attached_object = 96
 		vms.rb_classext_struct.classpath = 120
+	}
+
+	switch {
+	case version < rubyVersion(2, 6, 0):
+		rid.lastOpId = 166
+	case version < rubyVersion(2, 7, 0):
+		rid.lastOpId = 164
+	case version < rubyVersion(3, 1, 0):
+		rid.lastOpId = 168
+	case version < rubyVersion(3, 4, 0):
+		rid.lastOpId = 169
+	case version < rubyVersion(3, 5, 0):
+		rid.lastOpId = 170
+	default:
+		rid.lastOpId = 170
 	}
 
 	// Ruby does not provide introspection data, hard code the struct field offsets. Some
