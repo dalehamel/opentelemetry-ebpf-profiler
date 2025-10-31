@@ -180,12 +180,7 @@ type rubyData struct {
 		}
 
 		// RBasic
-		// TODO document
-		// Get the 'klass'
-		// struct RBasic {
-		//    VALUE                      flags;                /*     0     8 */
-		//    const VALUE                klass;                /*     8     8 */
-		// ...
+		// https://github.com/ruby/ruby/blob/d5c05585923bca11f07ff19edccd1f8e67620610/include/ruby/internal/core/rbasic.h#L110
 		rbasic_struct struct {
 			klass uint8
 		}
@@ -218,26 +213,40 @@ type rubyData struct {
 			running_ec uint16
 		}
 
-		// TODO add links to the structs
+		// rb_callable_method_entry_struct
 		// https://github.com/ruby/ruby/blob/fd59ac6410d0cc93a8baaa42df77491abdb2e9b6/method.h#L63-L69
 		rb_method_entry_struct struct {
 			flags, defined_class, def, owner uint8
 		}
 
-		rclass_and_rb_classext_t struct {
-			classext uint8
-		}
-
-		rb_classext_struct struct {
-			classpath, as_singleton_class_attached_object uint8
-		}
-
+		// rb_method_definition_struct
+		// https://github.com/ruby/ruby/blob/fd59ac6410d0cc93a8baaa42df77491abdb2e9b6/method.h#L180
 		rb_method_definition_struct struct {
 			method_type, body, original_id uint8
 		}
 
+		// rb_method_iseq_struct
+		// https://github.com/ruby/ruby/blob/fd59ac6410d0cc93a8baaa42df77491abdb2e9b6/method.h#L135
 		rb_method_iseq_struct struct {
 			iseqptr uint8
+		}
+
+		// RClass_and_rb_classext_t
+		// https://github.com/ruby/ruby/blob/fd59ac6410d0cc93a8baaa42df77491abdb2e9b6/internal/class.h#L146
+		rclass_and_rb_classext_t struct {
+			classext uint8
+		}
+
+		// rb_classext_struct
+		// https://github.com/ruby/ruby/blob/fd59ac6410d0cc93a8baaa42df77491abdb2e9b6/internal/class.h#L79
+		rb_classext_struct struct {
+			classpath, as_singleton_class_attached_object uint8
+		}
+
+		// rb_symbols_t
+		// https://github.com/ruby/ruby/blob/v3_4_7/symbol.h#L61-L66
+		rb_symbols_t struct {
+			 ids uint8
 		}
 	}
 }
@@ -733,7 +742,6 @@ func (r *rubyInstance) readClassName(classAddr libpf.Address) (libpf.String, boo
 	classFlags := r.rm.Ptr(classAddr)
 	classMask := classFlags & rubyTMask
 
-	// TODO clean this up more
 	classpathPtr = r.rm.Ptr(classAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath))
 	if classMask == rubyTIClass {
 		//https://github.com/ruby/ruby/blob/b627532/vm_backtrace.c#L1931-L1933
@@ -743,8 +751,8 @@ func (r *rubyInstance) readClassName(classAddr libpf.Address) (libpf.String, boo
 			classpathPtr = r.rm.Ptr(klassAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath))
 		}
 	} else if classFlags&r.r.rubyFlSingleton != 0 {
-		// https://github.com/ruby/ruby/blob/b627532/vm_backtrace.c#L1934-L1937
 		// https://github.com/ruby/ruby/blob/b627532/internal/class.h#L528
+		// https://github.com/ruby/ruby/blob/b627532/vm_backtrace.c#L1934-L1937
 		singleton = true
 		// From these ruby macros:
 		// #define RCLASS_ATTACHED_OBJECT(c) (RCLASS_EXT_PRIME(c)->as.singleton_class.attached_object)
@@ -779,29 +787,14 @@ func (r *rubyInstance) id2str(originalId uint64) (libpf.String, error) {
 	var symbolName libpf.String
 	var err error
 
-	vms := &r.r.vmStructs
-
 	// RUBY_ID_SCOPE_SHIFT = 4
 	// https://github.com/ruby/ruby/blob/797a4115bbb249c4f5f11e1b4bacba7781c68cee/template/id.h.tmpl#L30
 	RUBY_ID_SCOPE_SHIFT := 4
 
-	// TODO handle differences post 3.4.6:
-	//prior to 3.4.6:
-	// typedef struct {
-	//     rb_id_serial_t last_id; (uint32_t, 4 bytes)
-	//     st_table *str_sym; (pointer, so 8 bytes?)
-	//     VALUE ids; (4 + 8 = 12 offset)
-	//     VALUE dsymbol_fstr_hash;
-	// } rb_symbols_t;
-	//after 3.4.6:
-	// typedef struct {
-	//     rb_atomic_t next_id; (int, probably 4 bytes)
-	//     VALUE sym_set; (size of 8)
-	//
-	//     VALUE ids; (4 + 8 = 12 offset)
-	// } rb_symbols_t;
+	// https://github.com/ruby/ruby/blob/v3_4_5/symbol.c#L77
+	ID_ENTRY_UNIT := uint64(512)
 
-	IDS_OFFSET := 16 // rb_id_serial_t probably gets padded to be word-aligned
+	vms := &r.r.vmStructs
 
 	serial := originalId
 	if originalId > r.r.lastOpId {
@@ -814,11 +807,7 @@ func (r *rubyInstance) id2str(originalId uint64) (libpf.String, error) {
 		return libpf.NullString, fmt.Errorf("invalid serial %d, greater than last id %d", serial, lastId)
 	}
 
-	ids := r.rm.Ptr(r.globalSymbolsAddr + libpf.Address(IDS_OFFSET))
-
-	// https://github.com/ruby/ruby/blob/v3_4_5/symbol.c#L77
-	ID_ENTRY_UNIT := uint64(512)
-
+	ids := r.rm.Ptr(r.globalSymbolsAddr + libpf.Address(vms.rb_symbols_t.ids))
 	idx := serial / ID_ENTRY_UNIT
 
 	// string2cstring
@@ -827,6 +816,7 @@ func (r *rubyInstance) id2str(originalId uint64) (libpf.String, error) {
 	var idsPtr libpf.Address
 	var idsLen uint64
 
+	// TODO see if we can use the existing array read function here
 	// Handle embedded arrays
 	// https://github.com/ruby/ruby/blob/8836f26efa7a6deb0ef8b3f253d8d53d04d43152/include/ruby/internal/core/rarray.h#L297-L307
 	if (flags & RARRAY_EMBED_FLAG) > 0 {
@@ -839,8 +829,6 @@ func (r *rubyInstance) id2str(originalId uint64) (libpf.String, error) {
 		idsLen = uint64((flags & RARRAY_EMBED_LEN_MASK) >> RARRAY_EMBED_LEN_SHIFT)
 	} else {
 		idsPtr = r.rm.Ptr(ids + libpf.Address(vms.rarray_struct.as_heap_ptr))
-		// NOTE assuming that len and ary are at the same location in union, this might not be valid
-		// We may want to add these as separate struct fields in case this data structure changes
 		idsLen = r.rm.Uint64(ids + libpf.Address(vms.rarray_struct.as_ary))
 	}
 
@@ -848,7 +836,7 @@ func (r *rubyInstance) id2str(originalId uint64) (libpf.String, error) {
 		return libpf.NullString, fmt.Errorf("invalid idx %d, number of ids %d", idx, idsLen)
 	}
 
-	array := r.rm.Ptr(idsPtr + libpf.Address(idx*8)) // TODO don't hardcode 8 here, we just need the word size though
+	array := r.rm.Ptr(idsPtr + libpf.Address(idx*uint64(vms.size_of_value)))
 	arrayPtr := r.rm.Ptr(array + libpf.Address(vms.rarray_struct.as_heap_ptr))
 
 	flags = r.rm.Ptr(array)
@@ -856,8 +844,8 @@ func (r *rubyInstance) id2str(originalId uint64) (libpf.String, error) {
 		log.Debugf("Handling embedded array (2 levels) with shift")
 		arrayPtr = r.rm.Ptr(array + libpf.Address(vms.rarray_struct.as_ary))
 	}
-	offset := (serial % 512) * 2
-	stringPtr := r.rm.Ptr(arrayPtr + libpf.Address(offset*8))
+	offset := (serial % ID_ENTRY_UNIT) * 2
+	stringPtr := r.rm.Ptr(arrayPtr + libpf.Address(offset*uint64(vms.size_of_value)))
 
 	symbolName, err = r.getStringCached(stringPtr, r.readRubyString)
 	if err != nil {
@@ -1019,7 +1007,6 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 
 	if cme && r.r.hasClassPath {
 		classDefinition := r.rm.Ptr(frameAddr + libpf.Address(vms.rb_method_entry_struct.defined_class))
-
 		// TODO version gate this
 		classPath, singleton, err = r.readClassName(classDefinition)
 		if err != nil {
@@ -1406,6 +1393,9 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 		vms.iseq_constant_body.local_iseq = 168
 		vms.iseq_constant_body.size_of_iseq_constant_body = 344
 	}
+
+	// These three are assumed to be contiguous, so they can be read by
+	// npsr above. If this ever changes, the code needs to be adapted.
 	vms.iseq_location_struct.pathobj = 0
 	vms.iseq_location_struct.base_label = 8
 	vms.iseq_location_struct.label = 16
@@ -1462,6 +1452,8 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 	vms.rb_method_definition_struct.body = 8
 	vms.rb_method_definition_struct.original_id = 32
 	vms.rb_method_iseq_struct.iseqptr = 0
+
+	vms.rb_symbols_t.ids = 16
 
 	if version >= rubyVersion(3, 0, 0) {
 		if version >= rubyVersion(3, 3, 0) {
