@@ -1041,6 +1041,8 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	return nil
 }
 
+// qualified_method_name, translated into golang
+// https://github.com/ruby/ruby/blob/v3_4_7/vm_backtrace.c#L1947
 func qualifiedMethodName(classPath, methodName libpf.String, singleton bool) libpf.String {
 	if methodName == libpf.NullString {
 		return methodName
@@ -1056,6 +1058,8 @@ func qualifiedMethodName(classPath, methodName libpf.String, singleton bool) lib
 	return methodName
 }
 
+// rb_profile_frame_full_label, translated into golang
+// https://github.com/ruby/ruby/blob/v3_4_7/vm_backtrace.c#L1975
 func profileFrameFullLabel(classPath, label, baseLabel, methodName libpf.String, singleton, cframe bool) libpf.String {
 	qualified := qualifiedMethodName(classPath, methodName, singleton)
 
