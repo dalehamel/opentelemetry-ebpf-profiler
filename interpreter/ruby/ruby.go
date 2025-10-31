@@ -86,9 +86,6 @@ const (
 	// ISEQ_TYPE_METHOD
 	// https://github.com/ruby/ruby/blob/v3_4_5/vm_core.h#L380
 	iseqTypeMethod = 1
-
-	// https://github.com/ruby/ruby/blob/8836f26efa7a6deb0ef8b3f253d8d53d04d43152/include/ruby/internal/core/rarray.h#L122-L125
-	RARRAY_EMBED_LEN_SHIFT = RUBY_FL_USHIFT + 3
 )
 
 var (
@@ -97,6 +94,8 @@ var (
 	// regex to extract a version from a string
 	rubyVersionRegex = regexp.MustCompile(`^(\d)\.(\d)\.(\d)$`)
 
+	unknownCfunc   = libpf.Intern("UNKNOWN CFUNC")
+	cfuncDummyFile = libpf.Intern("<cfunc>")
 	// compiler check to make sure the needed interfaces are satisfied
 	_ interpreter.Data     = &rubyData{}
 	_ interpreter.Instance = &rubyInstance{}
@@ -296,12 +295,9 @@ func (r *rubyData) Attach(ebpf interpreter.EbpfHandler, pid libpf.PID, bias libp
 		return nil, err
 	}
 
-	log.Debugf("Bias is 0x%08x, global_symbols are 0x%08x, relocated xs 0x%08x", bias, r.globalSymbolsAddr, bias+r.globalSymbolsAddr)
-
 	return &rubyInstance{
 		r:                 r,
 		rm:                rm,
-		procInfo:          cdata,
 		globalSymbolsAddr: r.globalSymbolsAddr + bias,
 		addrToString:      addrToString,
 		memPool: sync.Pool{
@@ -344,8 +340,6 @@ type rubyInstance struct {
 
 	r  *rubyData
 	rm remotememory.RemoteMemory
-
-	procInfo support.RubyProcInfo
 
 	// globalSymbolsAddr is the offset of the global symbol table, for looking up ruby symbolic ids
 	globalSymbolsAddr libpf.Address
@@ -478,8 +472,8 @@ func (r *rubyInstance) getStringCached(addr libpf.Address, reader StringReader) 
 		return libpf.NullString, err
 	}
 	if !util.IsValidString(str) {
-		log.Debugf("Extracted invalid string from Ruby at 0x%x, len=%d, bytes=%x",
-			addr, len(str), []byte(str))
+		log.Debugf("Extracted invalid string from Ruby at 0x%x '%v'[len=%d]",
+			addr, unsafe.Slice(unsafe.StringData(str), min(len(str), 128)), len(str))
 		return libpf.NullString, fmt.Errorf("extracted invalid Ruby string from address 0x%x", addr)
 	}
 
@@ -746,7 +740,6 @@ func (r *rubyInstance) readClassName(classAddr libpf.Address) (libpf.String, boo
 		//https://github.com/ruby/ruby/blob/b627532/vm_backtrace.c#L1931-L1933
 
 		if klassAddr := r.rm.Ptr(classAddr + libpf.Address(r.r.vmStructs.rbasic_struct.klass)); klassAddr != 0 {
-			log.Debugf("Using klass for iclass type")
 			classpathPtr = r.rm.Ptr(klassAddr + libpf.Address(r.r.vmStructs.rclass_and_rb_classext_t.classext+r.r.vmStructs.rb_classext_struct.classpath))
 		}
 	} else if classFlags&r.r.rubyFlSingleton != 0 {
@@ -815,7 +808,6 @@ func (r *rubyInstance) id2str(originalId uint64) (libpf.String, error) {
 	var idsPtr libpf.Address
 	var idsLen uint64
 
-	// TODO see if we can use the existing array read function here
 	// Handle embedded arrays
 	// https://github.com/ruby/ruby/blob/8836f26efa7a6deb0ef8b3f253d8d53d04d43152/include/ruby/internal/core/rarray.h#L297-L307
 	if (flags & RARRAY_EMBED_FLAG) > 0 {
@@ -854,6 +846,7 @@ func (r *rubyInstance) id2str(originalId uint64) (libpf.String, error) {
 	return symbolName, err
 }
 
+// For debugging purposes only
 // Reconstructing (expanding back to 32 bits with 0xF fill)
 func unpackEnvFlags(packed uint16) uint32 {
 	// Extract the saved bytes
@@ -976,45 +969,41 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 				return err
 			}
 		} else {
-			// TODO move this to global?
-			methodName = libpf.Intern("UNKNOWN CFUNC")
+			methodName = unknownCfunc
 		}
 	case support.RubyFrameTypeCmeIseq:
 		cme = true
 
 		methodDefinition := r.rm.Ptr(frameAddr + libpf.Address(vms.rb_method_entry_struct.def))
 		if methodDefinition == 0 {
-			return fmt.Errorf("Unable to read method definition, CME (%08x) %v", frameAddr, err)
+			return fmt.Errorf("Unable to read method definition for CME (%04x)", frameFlags)
 		}
 
 		methodBody := r.rm.Ptr(methodDefinition + libpf.Address(vms.rb_method_definition_struct.body))
 		if methodBody == 0 {
-			return fmt.Errorf("unable to read method body for CME")
+			return fmt.Errorf("unable to read method body for CME (%04x)", frameFlags)
 		}
 
 		iseqBody = r.rm.Ptr(methodBody + libpf.Address(vms.rb_method_iseq_struct.iseqptr+vms.iseq_struct.body))
 
 		if iseqBody == 0 {
-			return fmt.Errorf("unable to read iseq body for CME")
+			return fmt.Errorf("unable to read iseq body for CME (%04x)", frameFlags)
 		}
 
 	case support.RubyFrameTypeIseq:
 		iseqBody = libpf.Address(frameAddr)
 	default:
-		return fmt.Errorf("Unable to get CME or ISEQ from frame address")
+		return fmt.Errorf("Unable to get CME or ISEQ from frame address (%d : %04x)", frameAddrType, frameFlags)
 	}
 
 	if cme && r.r.hasClassPath {
 		classDefinition := r.rm.Ptr(frameAddr + libpf.Address(vms.rb_method_entry_struct.defined_class))
 		classPath, singleton, err = r.readClassName(classDefinition)
 		if err != nil {
-			log.Errorf("Failed to read class name for cme: %v", err)
+			// Failing to read the class name is not a fatal error, keep going with just the method name
+			// and provide an incomplete label rather than nothing at all.
+			log.Errorf("Failed to read class name for cme (%d : %04x): %v", frameAddrType, frameFlags, err)
 		}
-	}
-
-	if err != nil {
-		log.Errorf("Couldn't handle frame (%d) (%04x) 0x%08x (pc: 0x%08x) as %d frame %08x %v", frameAddrType, frameFlags, frameAddr, pc, frameAddrType, iseqBody, err)
-		return err
 	}
 
 	// cframe get the method name from the global ID table
@@ -1022,7 +1011,7 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 	// so we gather their requirements here
 	if cframe {
 		fullLabel = qualifiedMethodName(classPath, methodName, singleton)
-		sourceFile = libpf.Intern("<cfunc>")
+		sourceFile = cfuncDummyFile
 	} else {
 		// The Ruby VM program counter that was extracted from the current call frame is embedded in
 		// the Linenos field.
@@ -1036,6 +1025,9 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 		fullLabel = profileFrameFullLabel(classPath, iseq.label, iseq.baseLabel, iseq.methodName, singleton, cframe)
 
 		if fullLabel == libpf.NullString {
+			// If it failed to symbolize at all, create a dummy value that includes the
+			// flags for debugging purposes.
+			// Most often this is only hit if the process died before we could read memory
 			fullLabel = libpf.Intern(fmt.Sprintf("UNKNOWN_FUNCTION %d %08x", frameAddrType, frameFlags))
 		}
 	}
@@ -1064,8 +1056,6 @@ func qualifiedMethodName(classPath, methodName libpf.String, singleton bool) lib
 	return methodName
 }
 
-// TODO make some tests for profileFullLabelName to cover the various cases it needs
-// to handle correctly
 func profileFrameFullLabel(classPath, label, baseLabel, methodName libpf.String, singleton, cframe bool) libpf.String {
 	qualified := qualifiedMethodName(classPath, methodName, singleton)
 
@@ -1460,7 +1450,6 @@ func Loader(ebpf interpreter.EbpfHandler, info *interpreter.LoaderInfo) (interpr
 			} else {
 				vms.rb_ractor_struct.running_ec = 0x190
 			}
-
 		} else {
 			if runtime.GOARCH == "amd64" {
 				vms.rb_ractor_struct.running_ec = 0x208

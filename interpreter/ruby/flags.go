@@ -28,4 +28,8 @@ const (
 	// https://github.com/ruby/ruby/blob/8836f26efa7a6deb0ef8b3f253d8d53d04d43152/include/ruby/internal/core/rarray.h#L114-L115
 	RARRAY_EMBED_LEN_MASK = RUBY_FL_USER9 | RUBY_FL_USER8 | RUBY_FL_USER7 | RUBY_FL_USER6 |
 		RUBY_FL_USER5 | RUBY_FL_USER4 | RUBY_FL_USER3
+
+	// RARRAY_EMBED_LEN_SHIFT
+	// https://github.com/ruby/ruby/blob/8836f26efa7a6deb0ef8b3f253d8d53d04d43152/include/ruby/internal/core/rarray.h#L122-L125
+	RARRAY_EMBED_LEN_SHIFT = RUBY_FL_USHIFT + 3
 )
