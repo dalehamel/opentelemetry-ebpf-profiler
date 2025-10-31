@@ -90,7 +90,6 @@ static EBPF_INLINE ErrorCode push_ruby(Trace *trace, u16 flags, u8 frame_type, u
       line       = packed;
     }
   }
-  // DEBUG_PRINT("%llx", iseq_addr);
   return _push(trace, file, line, FRAME_MARKER_RUBY);
 }
 
@@ -125,9 +124,9 @@ static EBPF_INLINE ErrorCode read_ruby_frame(
   rb_control_frame_t control_frame;
   u64 cf_size = sizeof(rb_control_frame_t);
 
-  // Ruby prior to 3.1.0 did not have jit_return
+  // Ruby prior to 3.1.0 control frame did not have jit_return
   if (rubyinfo->version < 0x30100)
-    cf_size -= sizeof(void *);
+    cf_size -= sizeof(control_frame.jit_return);
 
 read_cfp:
   pc          = 0;

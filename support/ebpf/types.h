@@ -690,7 +690,7 @@ typedef struct RubyUnwindState {
   void *stack_ptr;
   // Pointer to the last control frame struct in the Ruby VM stack we want to handle.
   void *last_stack_frame;
-  // Framefor last cfunc before we switched to native unwinder
+  // Frame for last cfunc before we switched to native unwinder
   u64 cfunc_saved_frame;
 } RubyUnwindState;
 
