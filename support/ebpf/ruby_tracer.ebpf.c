@@ -41,7 +41,6 @@ struct ruby_procs_t {
 #define VM_FRAME_MAGIC_CFUNC 0x55550001
 
 // Save on read ops by reading the whole control frame struct
-// TODO conditionally not consider the final jit_return pointer for older versions
 // as technically this reads too much memory
 typedef struct rb_control_frame_struct {
   const void *pc;         // cfp[0]
@@ -122,15 +121,19 @@ static EBPF_INLINE ErrorCode read_ruby_frame(
 
   u64 ep_check = 0;
 
-  rb_control_frame_t control_frame;
   vm_env_t vm_env;
+  rb_control_frame_t control_frame;
+  u64 cf_size = sizeof(rb_control_frame_t);
+
+  // Ruby prior to 3.1.0 did not have jit_return
+  if (rubyinfo->version < 0x30100)
+    cf_size -= sizeof(void *);
 
 read_cfp:
   pc          = 0;
   ep_check    = 0;
   frame_flags = 0;
-
-  if (bpf_probe_read_user(&control_frame, sizeof(rb_control_frame_t), (void *)(stack_ptr))) {
+  if (bpf_probe_read_user(&control_frame, cf_size, (void *)(stack_ptr))) {
     increment_metric(metricID_UnwindRubyErrReadStackPtr);
     return ERR_RUBY_READ_STACK_PTR;
   }
@@ -404,31 +407,25 @@ static EBPF_INLINE ErrorCode walk_ruby_stack(
     record->rubyUnwindState.cfunc_saved_frame = 0;
   }
 
-  // TODO probably just unroll this loop so upstream will be happy
-  u32 i = 0;
+  UNROLL for (u32 i = 0; i < FRAMES_PER_WALK_RUBY_STACK; ++i)
+  {
+    error = read_ruby_frame(record, rubyinfo, stack_ptr, next_unwinder);
+    if (error != ERR_OK)
+      return error;
 
-read_frame:
-  error = read_ruby_frame(record, rubyinfo, stack_ptr, next_unwinder);
-  if (error != ERR_OK)
-    return error;
-
-  if (last_stack_frame <= stack_ptr) {
-    // We have processed all frames in the Ruby VM and can stop here.
-    *next_unwinder = PROG_UNWIND_NATIVE;
-  } else {
-    // If we aren't at the end, advance the stack pointer to continue from the next frame
-    stack_ptr += rubyinfo->size_of_control_frame_struct;
+    if (last_stack_frame <= stack_ptr) {
+      // We have processed all frames in the Ruby VM and can stop here.
+      *next_unwinder = PROG_UNWIND_NATIVE;
+    } else {
+      // If we aren't at the end, advance the stack pointer to continue from the next frame
+      stack_ptr += rubyinfo->size_of_control_frame_struct;
+    }
+    // If the next winder is native, save state and move to next unwinder
+    if (*next_unwinder == PROG_UNWIND_NATIVE)
+      goto save_state;
   }
 
-  if (*next_unwinder != PROG_UNWIND_NATIVE) {
-    // jumping read_cfp label implements a much cheaper loop than using UNROLL macro
-    i += 1;
-    if (i < FRAMES_PER_WALK_RUBY_STACK)
-      goto read_frame;
-
-    *next_unwinder = PROG_UNWIND_RUBY;
-  }
-
+  *next_unwinder = PROG_UNWIND_RUBY;
 save_state:
   // Store the current progress in the Ruby unwind state so we can continue walking the stack
   // after the tail call.
