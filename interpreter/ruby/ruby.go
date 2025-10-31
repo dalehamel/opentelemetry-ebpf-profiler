@@ -119,7 +119,6 @@ type rubyData struct {
 
 	// this is compiled into ruby (id.h.tmpl) as a template and needed for symbolizing
 	// c function frames
-	// get this with `print (int)tLAST_OP_ID` in gdb
 	lastOpId uint64
 
 	// Flag for detecting singletons, can vary by version
@@ -246,7 +245,7 @@ type rubyData struct {
 		// rb_symbols_t
 		// https://github.com/ruby/ruby/blob/v3_4_7/symbol.h#L61-L66
 		rb_symbols_t struct {
-			 ids uint8
+			ids uint8
 		}
 	}
 }
@@ -1007,7 +1006,6 @@ func (r *rubyInstance) Symbolize(frame *host.Frame, frames *libpf.Frames) error 
 
 	if cme && r.r.hasClassPath {
 		classDefinition := r.rm.Ptr(frameAddr + libpf.Address(vms.rb_method_entry_struct.defined_class))
-		// TODO version gate this
 		classPath, singleton, err = r.readClassName(classDefinition)
 		if err != nil {
 			log.Errorf("Failed to read class name for cme: %v", err)
