@@ -40,6 +40,9 @@ struct ruby_procs_t {
 #define VM_FRAME_MAGIC_MASK  0x7fff0001
 #define VM_FRAME_MAGIC_CFUNC 0x55550001
 
+// Save on read ops by reading the whole control frame struct
+// TODO conditionally not consider the final jit_return pointer for older versions
+// as technically this reads too much memory
 typedef struct rb_control_frame_struct {
   const void *pc;         // cfp[0]
   void *sp;               // cfp[1]
@@ -50,6 +53,7 @@ typedef struct rb_control_frame_struct {
   void *jit_return;       // cfp[6] -- return address for JIT code
 } rb_control_frame_t;
 
+// Save on reads by putting all of these variables into one struct:
 // #define VM_ENV_DATA_INDEX_ME_CREF    (-2) /* ep[-2] */
 // #define VM_ENV_DATA_INDEX_SPECVAL    (-1) /* ep[-1] */
 // #define VM_ENV_DATA_INDEX_FLAGS      ( 0) /* ep[ 0] */
@@ -338,7 +342,6 @@ done_check:
 //
 // [5] classpath stored as struct member instead of ivar
 // https://github.com/ruby/ruby/commit/abff5f62037284024aaf469fc46a6e8de98fa1e3
-
 static EBPF_INLINE ErrorCode walk_ruby_stack(
   PerCPURecord *record,
   const RubyProcInfo *rubyinfo,
@@ -472,7 +475,6 @@ static EBPF_INLINE int unwind_ruby(struct pt_regs *ctx)
     // ruby_current_ec from thread local storage, analogous to how it is done
     // in ruby itself
     // https://github.com/ruby/ruby/blob/6c0315d99a93bdea947f821bd337000420ab41d1/vm_core.h#L2024
-
     u64 tsd_base;
     if (tsd_get_base((void **)&tsd_base) != 0) {
       DEBUG_PRINT("ruby: failed to get TSD base for TLS symbol lookup");
