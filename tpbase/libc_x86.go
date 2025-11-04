@@ -10,41 +10,151 @@ import (
 	"golang.org/x/arch/x86/x86asm"
 )
 
-// analyzeDTVOffsetX86 analyzes __tls_get_addr to find the DTV offset from FS base
-func analyzeDTVOffsetX86(code []byte) (uint32, error) {
-	// We're looking for: mov %fs:offset,%reg
-	// This loads the DTV pointer from thread-local storage
+// extractDTVInfoX86 analyzes __tls_get_addr to find the DTV offset from FS base
+func extractDTVInfoX86(code []byte) (DTVInfo, error) {
+	it := amd.NewInterpreterWithCode(code)
 
-	offset := 0
-	for offset < len(code) {
-		inst, err := x86asm.Decode(code[offset:], 64)
-		if err != nil {
-			// Try next byte in case of misalignment
-			offset++
-			continue
-		}
+	// __tls_get_addr takes a tls_index struct in RDI
+	tls_index := it.Regs.Get(amd.RDI)
+	module_id := e.Mem8(tls_index)
+	tls_offset := e.Mem8(e.Add(tls_index, e.Imm(8)))
 
-		// Check if this is a MOV instruction
-		if inst.Op == x86asm.MOV {
-			// Check if source operand is a memory reference with FS segment
-			if mem, ok := inst.Args[1].(x86asm.Mem); ok {
-				if mem.Segment == x86asm.FS {
-					// Found it! Extract the displacement (offset)
-					return uint32(mem.Disp), nil
-				}
-			}
-		}
-
-		offset += inst.Len
-
-		if inst.Op == x86asm.CMP {
-			// Typically this instruction should be near the beginning
-			// If we've gone too far, something's wrong
-			break
-		}
+	// Execute until RET
+	_, err := it.LoopWithBreak(func(op x86asm.Inst) bool {
+		return op.Op == x86asm.RET
+	})
+	if err != nil {
+		return DTVInfo{}, err
 	}
 
-	return 0, errors.New("DTV offset not found: no mov from FS segment found")
+	result := it.Regs.Get(amd.RAX)
+
+	// Capture variables
+	var (
+		dtvOffset  = e.NewImmediateCapture("dtvOffset")
+		entryWidth = e.NewImmediateCapture("entryWidth")
+	)
+
+	// Pattern 1: glibc - Direct DTV access
+	expected := e.Add(
+		e.Mem8(
+			e.Add(
+				e.MemWithSegment8(x86asm.FS, dtvOffset),
+				e.Multiply(module_id, entryWidth),
+			),
+		),
+		tls_offset,
+	)
+
+	if result.Match(expected) {
+		return DTVInfo{
+			Offset:     uint32(dtvOffset.CapturedValue()),
+			EntryWidth: uint32(entryWidth.CapturedValue()),
+			Indirect:   0,
+		}, nil
+	}
+
+	// Pattern 2: musl - The thread pointer itself might be represented differently
+	// Since FS:0 is the thread pointer, and DTV is at offset from it
+	thread_ptr := e.MemWithSegment8(x86asm.FS, e.Imm(0))
+	dtv_ptr := e.Mem8(e.Add(thread_ptr, dtvOffset))
+
+	expected = e.Add(
+		tls_offset,
+		e.Mem8(
+			e.Add(
+				dtv_ptr,
+				e.Multiply(module_id, entryWidth),
+			),
+		),
+	)
+
+	if result.Match(expected) {
+		return DTVInfo{
+			Offset:     uint32(dtvOffset.CapturedValue()),
+			EntryWidth: uint32(entryWidth.CapturedValue()),
+			Indirect:   1,
+		}, nil
+	}
+
+	// Pattern 3: Reverse addition order
+	expected = e.Add(
+		e.Mem8(
+			e.Add(
+				dtv_ptr,
+				e.Multiply(module_id, entryWidth),
+			),
+		),
+		tls_offset,
+	)
+
+	if result.Match(expected) {
+		return DTVInfo{
+			Offset:     uint32(dtvOffset.CapturedValue()),
+			EntryWidth: uint32(entryWidth.CapturedValue()),
+			Indirect:   1,
+		}, nil
+	}
+
+	// Pattern 4: Maybe the scale is encoded in the memory operand differently
+	// Try without explicit multiply
+	expected = e.Add(
+		tls_offset,
+		e.Mem8(
+			e.Add(
+				e.Mem8(e.Add(thread_ptr, dtvOffset)),
+				e.Multiply(e.ZeroExtend32(module_id), entryWidth),
+			),
+		),
+	)
+
+	if result.Match(expected) {
+		return DTVInfo{
+			Offset:     uint32(dtvOffset.CapturedValue()),
+			EntryWidth: uint32(entryWidth.CapturedValue()),
+			Indirect:   1,
+		}, nil
+	}
+
+	// Pattern 5: Try hardcoded offset 8 for musl
+	expected = e.Add(
+		tls_offset,
+		e.Mem8(
+			e.Add(
+				e.Mem8(e.Add(thread_ptr, e.Imm(8))),
+				e.Multiply(module_id, entryWidth),
+			),
+		),
+	)
+
+	if result.Match(expected) {
+		return DTVInfo{
+			Offset:     8,
+			EntryWidth: uint32(entryWidth.CapturedValue()),
+			Indirect:   1,
+		}, nil
+	}
+
+	// Pattern 6: Try with scale 8 hardcoded
+	expected = e.Add(
+		tls_offset,
+		e.Mem8(
+			e.Add(
+				e.Mem8(e.Add(thread_ptr, dtvOffset)),
+				e.Multiply(module_id, e.Imm(8)),
+			),
+		),
+	)
+
+	if result.Match(expected) {
+		return DTVInfo{
+			Offset:     uint32(dtvOffset.CapturedValue()),
+			EntryWidth: 8,
+			Indirect:   1,
+		}, nil
+	}
+
+	return DTVInfo{}, errors.New("could not extract DTV info: no matching pattern found")
 }
 
 func extractTSDInfoX86(code []byte) (TSDInfo, error) {

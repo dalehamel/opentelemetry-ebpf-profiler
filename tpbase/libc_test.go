@@ -10,6 +10,176 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestExtractDTVOffset(t *testing.T) {
+	testCases := map[string]struct {
+		machine elf.Machine
+		code    []byte
+		info    DTVInfo
+	}{
+		"glibc 2.36 / debian 12 / x86_64": {
+			machine: elf.EM_X86_64,
+			code: []byte{
+				// mov    %fs:0x8,%rdx
+				// mov    0x1fc48(%rip),%rax        # 0x7ffff7ffe0b8 <_rtld_global+4248>
+				// cmp    %rax,(%rdx)
+				// jne    0x7ffff7fde48b <__tls_get_addr+43>
+				// mov    (%rdi),%rax
+				// shl    $0x4,%rax
+				// mov    (%rdx,%rax,1),%rax
+				// cmp    $0xffffffffffffffff,%rax
+				// je     0x7ffff7fde48b <__tls_get_addr+43>
+				// add    0x8(%rdi),%rax
+				// ret
+				// push   %rbp
+				// mov    %rsp,%rbp
+				// and    $0xfffffffffffffff0,%rsp
+				// call   0x7ffff7fdbd40 <__tls_get_addr_slow>
+				// mov    %rbp,%rsp
+				// pop    %rbp
+				// ret
+				0x64, 0x48, 0x8b, 0x14, 0x25, 0x08, 0x00, 0x00, 0x00,
+				0x48, 0x8b, 0x05, 0x48, 0xfc, 0x01, 0x00,
+				0x48, 0x39, 0x02,
+				0x75, 0x16,
+				0x48, 0x8b, 0x07,
+				0x48, 0xc1, 0xe0, 0x04,
+				0x48, 0x8b, 0x04, 0x02,
+				0x48, 0x83, 0xf8, 0xff,
+				0x74, 0x05,
+				0x48, 0x03, 0x47, 0x08,
+				0xc3,
+				0x55,
+				0x48, 0x89, 0xe5,
+				0x48, 0x83, 0xe4, 0xf0,
+				0xe8, 0xa8, 0xd8, 0xff, 0xff,
+				0x48, 0x89, 0xec,
+				0x5d,
+				0xc3,
+			},
+			info: DTVInfo{
+				Offset:     8,
+				EntryWidth: 16,
+				Indirect:   0,
+			},
+		},
+		"glibc 2.32 / Fedora 33 / x86_64": {
+			machine: elf.EM_X86_64,
+			code: []byte{
+				// endbr64
+				// mov    %fs:0x8,%rdx
+				// mov    0x1394c(%rip),%rax        # 0x7f48d90c2ff0 <_rtld_local+4080>
+				// cmp    %rax,(%rdx)
+				// jne    0x7f48d90af6bf <__tls_get_addr+47>
+				// mov    (%rdi),%rax
+				// shl    $0x4,%rax
+				// mov    (%rdx,%rax,1),%rax
+				// cmp    $0xffffffffffffffff,%rax
+				// je     0x7f48d90af6bf <__tls_get_addr+47>
+				// add    0x8(%rdi),%rax
+				// ret
+				// push   %rbp
+				// mov    %rsp,%rbp
+				// and    $0xfffffffffffffff0,%rsp
+				// call   0x7f48d90a9ed0 <__tls_get_addr_slow>
+				// mov    %rbp,%rsp
+				// pop    %rbp
+				// ret
+
+				0xf3, 0x0f, 0x1e, 0xfa,
+				0x64, 0x48, 0x8b, 0x14, 0x25, 0x08, 0x00, 0x00, 0x00,
+				0x48, 0x8b, 0x05, 0x4c, 0x39, 0x01, 0x00,
+				0x48, 0x39, 0x02,
+				0x75, 0x16,
+				0x48, 0x8b, 0x07,
+				0x48, 0xc1, 0xe0, 0x04,
+				0x48, 0x8b, 0x04, 0x02,
+				0x48, 0x83, 0xf8, 0xff,
+				0x74, 0x05,
+				0x48, 0x03, 0x47, 0x08,
+				0xc3,
+				0x55,
+				0x48, 0x89, 0xe5,
+				0x48, 0x83, 0xe4, 0xf0,
+				0xe8, 0x04, 0xa8, 0xff, 0xff,
+				0x48, 0x89, 0xec,
+				0x5d,
+				0xc3,
+			},
+			info: DTVInfo{
+				Offset:     8,
+				EntryWidth: 16,
+				Indirect:   0,
+			},
+		},
+		"musl 1.2.5 / alpine 3.22.2 / x86_64": {
+			machine: elf.EM_X86_64,
+			code: []byte{
+				// mov    %fs:0x0,%rax
+				// mov    (%rdi),%rcx
+				// mov    0x8(%rax),%rdx
+				// mov    0x8(%rdi),%rax
+				// add    (%rdx,%rcx,8),%rax
+				// ret
+				0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00,
+				0x48, 0x8b, 0x0f,
+				0x48, 0x8b, 0x50, 0x08,
+				0x48, 0x8b, 0x47, 0x08,
+				0x48, 0x03, 0x04, 0xca,
+				0xc3,
+			},
+			info: DTVInfo{
+				Offset:     8,
+				EntryWidth: 8,
+				Indirect:   1,
+			},
+		},
+		"musl 1.1.5 / alpine 3.1 / x86_64": {
+			machine: elf.EM_X86_64,
+			code: []byte{
+				// mov    %fs:0x0,%rax
+				// mov    0x8(%rax),%rax
+				// mov    (%rdi),%rdx
+				// cmp    %rdx,(%rax)
+				// jae    0x7f824da49ef3 <__tls_get_addr+26>
+				// jmpq   0x7f824da191d5
+				// mov    (%rax,%rdx,8),%rax
+				// add    0x8(%rdi),%rax
+				// retq
+				0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00,
+				0x48, 0x8b, 0x40, 0x08,
+				0x48, 0x8b, 0x17,
+				0x48, 0x39, 0x10,
+				0x73, 0x05,
+				0xe9, 0xe2, 0xf2, 0xfc, 0xff,
+				0x48, 0x8b, 0x04, 0xd0,
+				0x48, 0x03, 0x47, 0x08,
+				0xc3,
+			},
+			info: DTVInfo{
+				Offset:     8,
+				EntryWidth: 8,
+				Indirect:   1,
+			},
+		},
+	}
+
+	for name, test := range testCases {
+		t.Run(name, func(t *testing.T) {
+			var info DTVInfo
+			var err error
+			switch test.machine {
+			case elf.EM_X86_64:
+				info, err = extractDTVInfoX86(test.code)
+			case elf.EM_AARCH64:
+				//info, err = extractDTVOffsetARM(test.code)
+			}
+			if assert.NoError(t, err) {
+				assert.Equal(t, test.info, info)
+			}
+		})
+	}
+}
+
 func TestExtractTSDInfo(t *testing.T) {
 	testCases := map[string]struct {
 		machine elf.Machine
