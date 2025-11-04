@@ -1,7 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package tpbase // import "go.opentelemetry.io/ebpf-profiler/tpbase"
+package libc // import "go.opentelemetry.io/ebpf-profiler/libc"
 
 import (
 	"debug/elf"
@@ -17,7 +17,7 @@ type LibcInfo struct {
 }
 
 type DTVInfo struct {
-	Offset     uint32 // Offset of DTV from FS base (or from thread pointer)
+	Offset     int32  // Offset of DTV from FS base (or from thread pointer)
 	EntryWidth uint32 // Width of each DTV entry in bytes
 	Indirect   uint8  // 0 if DTV is at FS+offset, 1 if at [FS+0]+offset
 }
@@ -153,7 +153,7 @@ func extractDTVInfo(ef *pfelf.File) (*DTVInfo, error) {
 	var info DTVInfo
 	switch ef.Machine {
 	case elf.EM_AARCH64:
-		return nil, fmt.Errorf("aarch64 extraction is not yet supported")
+		info, err = extractDTVInfoARM(code)
 	case elf.EM_X86_64:
 		info, err = extractDTVInfoX86(code)
 	default:

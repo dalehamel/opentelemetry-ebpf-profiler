@@ -1,7 +1,8 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package tpbase // import "go.opentelemetry.io/ebpf-profiler/tpbase"
+package libc // import "go.opentelemetry.io/ebpf-profiler/libc"
+
 import (
 	"errors"
 
@@ -48,7 +49,7 @@ func extractDTVInfoX86(code []byte) (DTVInfo, error) {
 
 	if result.Match(expected) {
 		return DTVInfo{
-			Offset:     uint32(dtvOffset.CapturedValue()),
+			Offset:     int32(dtvOffset.CapturedValue()),
 			EntryWidth: uint32(entryWidth.CapturedValue()),
 			Indirect:   0,
 		}, nil
@@ -71,7 +72,7 @@ func extractDTVInfoX86(code []byte) (DTVInfo, error) {
 
 	if result.Match(expected) {
 		return DTVInfo{
-			Offset:     uint32(dtvOffset.CapturedValue()),
+			Offset:     int32(dtvOffset.CapturedValue()),
 			EntryWidth: uint32(entryWidth.CapturedValue()),
 			Indirect:   1,
 		}, nil
@@ -90,7 +91,7 @@ func extractDTVInfoX86(code []byte) (DTVInfo, error) {
 
 	if result.Match(expected) {
 		return DTVInfo{
-			Offset:     uint32(dtvOffset.CapturedValue()),
+			Offset:     int32(dtvOffset.CapturedValue()),
 			EntryWidth: uint32(entryWidth.CapturedValue()),
 			Indirect:   1,
 		}, nil
@@ -110,7 +111,7 @@ func extractDTVInfoX86(code []byte) (DTVInfo, error) {
 
 	if result.Match(expected) {
 		return DTVInfo{
-			Offset:     uint32(dtvOffset.CapturedValue()),
+			Offset:     int32(dtvOffset.CapturedValue()),
 			EntryWidth: uint32(entryWidth.CapturedValue()),
 			Indirect:   1,
 		}, nil
@@ -148,7 +149,7 @@ func extractDTVInfoX86(code []byte) (DTVInfo, error) {
 
 	if result.Match(expected) {
 		return DTVInfo{
-			Offset:     uint32(dtvOffset.CapturedValue()),
+			Offset:     int32(dtvOffset.CapturedValue()),
 			EntryWidth: 8,
 			Indirect:   1,
 		}, nil
