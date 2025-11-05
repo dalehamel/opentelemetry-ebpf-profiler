@@ -1,7 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package tpbase // import "go.opentelemetry.io/ebpf-profiler/tpbase"
+package libc // import "go.opentelemetry.io/ebpf-profiler/libc"
 
 import (
 	"debug/elf"
@@ -10,6 +10,17 @@ import (
 
 	"go.opentelemetry.io/ebpf-profiler/libpf/pfelf"
 )
+
+type LibcInfo struct {
+	DTVInfo *DTVInfo
+	TSDInfo *TSDInfo
+}
+
+type DTVInfo struct {
+	Offset     int32  // Offset of DTV from FS base (or from thread pointer)
+	EntryWidth uint32 // Width of each DTV entry in bytes
+	Indirect   uint8  // 0 if DTV is at FS+offset, 1 if at [FS+0]+offset
+}
 
 // TSDInfo contains information to access C-library's Thread Specific Data from eBPF
 type TSDInfo struct {
@@ -84,6 +95,23 @@ func IsPotentialTSDDSO(filename string) bool {
 	return libcRegex.MatchString(filename)
 }
 
+func ExtractLibcInfo(ef *pfelf.File) (*LibcInfo, error) {
+	tsdinfo, err := ExtractTSDInfo(ef)
+	if err != nil {
+		return nil, err
+	}
+
+	dtvinfo, err := extractDTVInfo(ef)
+	if err != nil {
+		return nil, err
+	}
+
+	return &LibcInfo{
+		TSDInfo: tsdinfo,
+		DTVInfo: dtvinfo,
+	}, nil
+}
+
 // ExtractTSDInfo extracts the introspection data for pthread thread specific data.
 func ExtractTSDInfo(ef *pfelf.File) (*TSDInfo, error) {
 	_, code, err := ef.SymbolData("__pthread_getspecific", 2048)
@@ -108,6 +136,31 @@ func ExtractTSDInfo(ef *pfelf.File) (*TSDInfo, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract getspecific data: %s", err)
+	}
+	return &info, nil
+}
+
+// extractDTVInfo extracts the introspection data for the DTV to access TLS vars
+func extractDTVInfo(ef *pfelf.File) (*DTVInfo, error) {
+	_, code, err := ef.SymbolData("__tls_get_addr", 2048)
+	if err != nil {
+		return nil, fmt.Errorf("unable to read '__tls_get_addr': %s", err)
+	}
+	if len(code) < 8 {
+		return nil, fmt.Errorf("__tls_get_addr function size is %d", len(code))
+	}
+
+	var info DTVInfo
+	switch ef.Machine {
+	case elf.EM_AARCH64:
+		info, err = extractDTVInfoARM(code)
+	case elf.EM_X86_64:
+		info, err = extractDTVInfoX86(code)
+	default:
+		return nil, fmt.Errorf("unsupported arch %s", ef.Machine.String())
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract DTV data: %s", err)
 	}
 	return &info, nil
 }
