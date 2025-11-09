@@ -18,6 +18,7 @@ import (
 import "C"
 
 const (
+<<<<<<< HEAD
 	FrameMarkerUnknown  = C.FRAME_MARKER_UNKNOWN
 	FrameMarkerErrorBit = C.FRAME_MARKER_ERROR_BIT
 	FrameMarkerPython   = C.FRAME_MARKER_PYTHON
@@ -33,6 +34,12 @@ const (
 	FrameMarkerGo       = C.FRAME_MARKER_GO
 	FrameMarkerBEAM     = C.FRAME_MARKER_BEAM
 	FrameMarkerAbort    = C.FRAME_MARKER_ABORT
+)
+
+const (
+	FrameFlagError         = C.FRAME_FLAG_ERROR
+	FrameFlagReturnAddress = C.FRAME_FLAG_RETURN_ADDRESS
+	FrameFlagPidSpecific   = C.FRAME_FLAG_PID_SPECIFIC
 )
 
 const (
@@ -58,8 +65,6 @@ const (
 const (
 	EventTypeGenericPID = C.EVENT_TYPE_GENERIC_PID
 )
-
-const MaxFrameUnwinds = C.MAX_FRAME_UNWINDS
 
 const UnwindInfoMaxEntries = C.UNWIND_INFO_MAX_ENTRIES
 
@@ -110,7 +115,6 @@ type ApmTraceID C.ApmTraceID
 type CustomLabel C.CustomLabel
 type CustomLabelsArray C.CustomLabelsArray
 type Event C.Event
-type Frame C.Frame
 type OffsetRange C.OffsetRange
 type PIDPage C.PIDPage
 type PIDPageMappingInfo C.PIDPageMappingInfo
@@ -134,7 +138,6 @@ type RubyProcInfo C.RubyProcInfo
 type V8ProcInfo C.V8ProcInfo
 
 const (
-	Sizeof_Frame      = C.sizeof_Frame
 	Sizeof_StackDelta = C.sizeof_StackDelta
 	Sizeof_Trace      = C.sizeof_Trace
 
