@@ -1,7 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package tpbase // import "go.opentelemetry.io/ebpf-profiler/tpbase"
+package libc // import "go.opentelemetry.io/ebpf-profiler/libc"
 
 import (
 	"errors"
@@ -266,5 +266,74 @@ func extractTSDInfoARM(code []byte) (TSDInfo, error) {
 		Offset:     int16(regs[0].offset),
 		Multiplier: uint8(regs[0].multiplier),
 		Indirect:   indirect,
+	}, nil
+}
+
+func extractDTVInfoARM(code []byte) (DTVInfo, error) {
+	dtvOffset := int32(0)
+	entryWidth := uint32(0)
+	foundThreadPtr := false
+	foundDTVLoad := false
+
+	// Scan entire function
+	for offs := 0; offs < len(code); offs += 4 {
+		if offs+4 > len(code) {
+			break
+		}
+
+		inst, err := aa.Decode(code[offs:])
+		if err != nil {
+			return DTVInfo{}, err
+		}
+
+		switch inst.Op {
+
+		case aa.MRS:
+			foundThreadPtr = true
+
+		case aa.LDUR:
+			if len(inst.Args) >= 2 {
+				if m, ok := inst.Args[1].(aa.MemImmediate); ok {
+					imm, ok := ah.DecodeImmediate(m)
+					if ok {
+						dtvOffset = int32(imm)
+						foundDTVLoad = true
+					}
+				}
+			}
+
+		case aa.LDR:
+			if len(inst.Args) >= 2 {
+				// Check what type of LDR this is
+				switch m := inst.Args[1].(type) {
+				case aa.MemImmediate:
+					if foundThreadPtr && !foundDTVLoad {
+						imm, ok := ah.DecodeImmediate(m)
+						if ok {
+							dtvOffset = int32(imm)
+							foundDTVLoad = true
+						}
+					}
+
+				case aa.MemExtend:
+					if m.Amount > 0 {
+						entryWidth = uint32(1 << m.Amount)
+					}
+				}
+			}
+
+		case aa.LSL:
+			if len(inst.Args) >= 3 {
+				if imm, ok := inst.Args[2].(aa.Imm); ok {
+					entryWidth = uint32(1 << imm.Imm)
+				}
+			}
+		}
+	}
+
+	return DTVInfo{
+		Offset:     dtvOffset,
+		EntryWidth: entryWidth,
+		Indirect:   1,
 	}, nil
 }

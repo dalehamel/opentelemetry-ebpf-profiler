@@ -7,7 +7,7 @@
 // relative to the 'struct task_struct'. This is needed to support Thread Local
 // Storage access in eBPF.
 
-package tpbase // import "go.opentelemetry.io/ebpf-profiler/tpbase"
+package libc // import "go.opentelemetry.io/ebpf-profiler/libc"
 
 import (
 	"fmt"
